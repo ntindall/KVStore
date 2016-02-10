@@ -1,0 +1,9 @@
+1. Set up system such that client can ask master a question and get an
+   answer GET and PUT.
+2. Two-phase commit
+3. Caching logic.
+4. Consistent hashing.
+5. Deal with slave death (keeping logs in sync)
+6. Logging
+7. Testing
+8. High Throughput testing (only GETS / only PUTS / only GETS or PUTS).

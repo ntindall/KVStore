@@ -4,6 +4,8 @@ import Lib
 import System.IO
 import Network
 
+import Debug.Trace
+
 main :: IO ()
 main = do
   success <- Lib.parseArguments
@@ -19,7 +21,9 @@ runKVMaster cfg = do
   putStrLn $ "[!] Server received " ++ msg --print the message
   -- todo... threading???
 
+  --for now, just send to first slave
   let (slave1Name, slave1PortId) = head (Lib.slaveConfig cfg)
   slaveH <- connectTo slave1Name slave1PortId
   hPutStr slaveH msg
+  hClose slaveH
   hClose h
