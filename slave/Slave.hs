@@ -1,10 +1,16 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Main where
 
 import Lib
-import System.IO
+import System.IO as IO
 import Network
 import Data.Maybe
-import Data.List
+import Data.List as List
+
+import Data.ByteString.Lazy as B
+
+import Debug.Trace
 
 type SlaveId = Int
 
@@ -15,7 +21,7 @@ main = do
     Nothing     -> Lib.printUsage --an error occured
     Just config -> 
       let slaveId = fromMaybe (-1) (Lib.slaveNumber config)
-      in if (slaveId <= (-1) || slaveId >= length (Lib.slaveConfig config))
+      in if (slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config))
          then Lib.printUsage --error
          else runKVSlave config slaveId
 
@@ -23,7 +29,15 @@ runKVSlave :: Lib.Config -> SlaveId -> IO ()
 runKVSlave cfg slaveId = do
     let (slaveName, slavePortId) = (Lib.slaveConfig cfg) !! slaveId
     s <- listenOn slavePortId
-    (h, hostName, portNumber) <- accept s
-    msg <- hGetLine h
-    putStrLn $ "[!] Slave received " ++ msg --print the message 
-    hClose h
+
+    processMessages s cfg
+
+processMessages :: Socket
+                -> Lib.Config
+                -> IO()
+processMessages s cfg = do
+  (h, hostName, portNumber) <- accept s
+
+  msg <- B.hGetContents h
+  B.putStr msg --print the message 
+  processMessages s cfg

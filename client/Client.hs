@@ -1,10 +1,19 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Main where
 
 import qualified Lib as Lib
-import System.Console.GetOpt
+
+import qualified Data.Binary as Binary
+import Data.ByteString.Lazy as B
+
 import System.Environment
-import System.IO
+import System.IO as IO
 import Network
+
+-------------------------------------
+
+import KVProtocol
 
 import Debug.Trace
 
@@ -17,7 +26,21 @@ main = do
 
 runKVClient :: Lib.Config -> IO ()
 runKVClient cfg = do
-  msg <- getLine
   h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
-  hPutStr h msg
-  hClose h
+  issueRequests h
+  IO.hClose h
+
+issueRequests :: Handle
+              -> IO()
+issueRequests h = do
+  kvReq <- makeRequest
+  let encoding = Binary.encode kvReq
+
+  IO.putStr $ (show kvReq)
+  
+  B.hPut h encoding
+  issueRequests h
+
+
+makeRequest :: IO (KVRequest)
+makeRequest = return (Get "ExampleRequest")

@@ -1,5 +1,6 @@
 flags: {}
 packages:
 - '.'
-extra-deps: []
+extra-deps: 
+- derive-2.5.22
 resolver: lts-3.20
