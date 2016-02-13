@@ -36,12 +36,12 @@ issueRequests cfg = do
   h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
   
   kvReq <- makeRequest
-  sendRequest h kvReq
+  sendMessage h kvReq
   
   IO.hClose h
 
   issueRequests cfg
 
 
-makeRequest :: IO (KVRequest)
-makeRequest = return (Get "ExampleRequest")
+makeRequest :: IO (KVMessage)
+makeRequest = return $ KVRequest (Get "ExampleRequest")

@@ -4,12 +4,11 @@ module KVProtocol
   (
     KVRequest(..)
   , KVResponse(..)
+  , KVMessage(..)
   , KVKey
   , KVVal
-  , responseDec
-  , requestDec
-  , getRequest
-  , sendRequest
+  , getMessage
+  , sendMessage
   ) where
 
 import Data.Binary
@@ -41,33 +40,39 @@ data KVResponse = KVSuccess {
                   }
   deriving (Eq, Show)
 
+data KVMessage = KVResponse {
+                  response :: KVResponse
+                }
+               | KVRequest {
+                  request :: KVRequest
+                }
+  deriving (Eq, Show)
+
 data KVObject = KBObject B.ByteString B.ByteString
   deriving (Eq, Show)
 
-responseDec :: B.ByteString -> KVResponse
-responseDec b = (decode b) :: KVResponse
+decodeMsg :: B.ByteString -> KVMessage
+decodeMsg b = (decode b) :: KVMessage
 
-requestDec :: B.ByteString -> KVRequest
-requestDec b = traceShow b $ (decode b) :: KVRequest
-
-getRequest :: Handle -> IO(Either String KVRequest)
-getRequest h = do
+getMessage :: Handle -> IO(Either String KVMessage)
+getMessage h = do
   msg <- C8.hGetLine h
   case (C8.null msg) of
     True -> return $ Left "Handle is empty"
-    False -> let req = requestDec $ fromStrict msg 
+    False -> let req = decodeMsg $ fromStrict msg 
              in return $ Right req
 
 
 
-sendRequest :: Handle -> KVRequest -> IO ()
-sendRequest h req = do
+sendMessage :: Handle -> KVMessage -> IO ()
+sendMessage h req = do
   IO.putStr $ (show req) ++ ['\n']
   C8.hPutStrLn h $ toStrict (encode req)
 
 {-!
 deriving instance Binary KVRequest
 deriving instance Binary KVResponse
+deriving instance Binary KVMessage
 deriving instance Binary KVObject
 !-}
 
@@ -109,6 +114,23 @@ instance Binary KVResponse where
                    1 -> do x1 <- get
                            return (KVFailure x1)
                    _ -> error "Corrupted binary data for KVResponse"
+
+ 
+instance Binary KVMessage where
+        put x
+          = case x of
+                KVResponse x1 -> do putWord8 0
+                                    put x1
+                KVRequest x1 -> do putWord8 1
+                                   put x1
+        get
+          = do i <- getWord8
+               case i of
+                   0 -> do x1 <- get
+                           return (KVResponse x1)
+                   1 -> do x1 <- get
+                           return (KVRequest x1)
+                   _ -> error "Corrupted binary data for KVMessage"
 
  
 instance Binary KVObject where

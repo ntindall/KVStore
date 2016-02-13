@@ -12,6 +12,7 @@ import Data.ByteString.Lazy as B
 import Data.ByteString.Char8 as C8
 
 import Control.Exception
+import Control.Concurrent
 
 import Debug.Trace
 
@@ -35,7 +36,9 @@ runKVSlave cfg slaveId = do
     let (slaveName, slavePortId) = (Lib.slaveConfig cfg) !! slaveId
     s <- listenOn slavePortId
 
+    forkIO $ sendResponses s cfg -- fork a child
     processMessages s cfg
+    return ()
 
 processMessages :: Socket
                 -> Lib.Config
@@ -46,8 +49,11 @@ processMessages s cfg =
             hClose h
             processMessages s cfg)
           (\(h, hostName, portNumber) -> do
-              req <- getRequest h
+              req <- getMessage h
               IO.putStr $ (show req) --print the message 
-
-
           )
+
+sendResponses :: Socket
+              -> Lib.Config
+              -> IO()
+sendResponses s cfg = return ()

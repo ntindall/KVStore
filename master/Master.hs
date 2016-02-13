@@ -33,7 +33,7 @@ runKVMaster cfg = do
 processRequests :: Socket -> Lib.Config ->  IO()
 processRequests s cfg = do
   (h, hostName, portNumber) <- accept s
-  req <- getRequest h
+  req <- getMessage h
 
   case req of 
     Left errmsg -> do
@@ -44,11 +44,12 @@ processRequests s cfg = do
 
       processRequests s cfg
 
-forwardRequest :: KVRequest                         --request to be forwarded
+forwardRequest :: KVMessage                         --request to be forwarded
                -> Lib.Config                        --ring configuration
                -> [IO()]                          
 forwardRequest req cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
   where forwardToNode (name, portId) = do
           slaveH <- connectTo name portId
-          sendRequest slaveH req
+          sendMessage slaveH req
           hClose slaveH
+          
