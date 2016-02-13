@@ -9,8 +9,13 @@ import Data.Maybe
 import Data.List as List
 
 import Data.ByteString.Lazy as B
+import Data.ByteString.Char8 as C8
+
+import Control.Exception
 
 import Debug.Trace
+
+import KVProtocol
 
 type SlaveId = Int
 
@@ -35,9 +40,14 @@ runKVSlave cfg slaveId = do
 processMessages :: Socket
                 -> Lib.Config
                 -> IO()
-processMessages s cfg = do
-  (h, hostName, portNumber) <- accept s
+processMessages s cfg =
+  bracket (accept s)
+          (\(h,_,_) -> do
+            hClose h
+            processMessages s cfg)
+          (\(h, hostName, portNumber) -> do
+              req <- getRequest h
+              IO.putStr $ (show req) --print the message 
 
-  msg <- B.hGetContents h
-  B.putStr msg --print the message 
-  processMessages s cfg
+
+          )

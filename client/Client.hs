@@ -6,6 +6,7 @@ import qualified Lib as Lib
 
 import qualified Data.Binary as Binary
 import Data.ByteString.Lazy as B
+import Data.ByteString.Char8 as C8
 
 import System.Environment
 import System.IO as IO
@@ -26,20 +27,20 @@ main = do
 
 runKVClient :: Lib.Config -> IO ()
 runKVClient cfg = do
+
+  issueRequests cfg
+
+issueRequests :: Lib.Config
+              -> IO()
+issueRequests cfg = do
   h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
-  issueRequests h
+  
+  kvReq <- makeRequest
+  sendRequest h kvReq
+  
   IO.hClose h
 
-issueRequests :: Handle
-              -> IO()
-issueRequests h = do
-  kvReq <- makeRequest
-  let encoding = Binary.encode kvReq
-
-  IO.putStr $ (show kvReq)
-  
-  B.hPut h encoding
-  issueRequests h
+  issueRequests cfg
 
 
 makeRequest :: IO (KVRequest)

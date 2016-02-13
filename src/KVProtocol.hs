@@ -1,17 +1,28 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module KVProtocol
   (
     KVRequest(..)
   , KVResponse(..)
   , KVKey
   , KVVal
+  , responseDec
+  , requestDec
+  , getRequest
+  , sendRequest
   ) where
 
 import Data.Binary
-import Data.ByteString.Lazy
+import Data.ByteString.Lazy  as B
+import Data.ByteString.Char8 as C8
+import Debug.Trace
 
-type KVKey = ByteString
+import Network
+import System.IO as IO
 
-type KVVal = ByteString
+type KVKey = B.ByteString
+
+type KVVal = B.ByteString
 
 data KVRequest = Get {
                   key :: KVKey
@@ -26,13 +37,33 @@ data KVResponse = KVSuccess {
                     obj :: KVObject
                   }
                 | KVFailure {
-                    errorMsg :: ByteString
+                    errorMsg :: B.ByteString
                   }
   deriving (Eq, Show)
 
-data KVObject = KBObject ByteString ByteString
+data KVObject = KBObject B.ByteString B.ByteString
   deriving (Eq, Show)
 
+responseDec :: B.ByteString -> KVResponse
+responseDec b = (decode b) :: KVResponse
+
+requestDec :: B.ByteString -> KVRequest
+requestDec b = traceShow b $ (decode b) :: KVRequest
+
+getRequest :: Handle -> IO(Either String KVRequest)
+getRequest h = do
+  msg <- C8.hGetLine h
+  case (C8.null msg) of
+    True -> return $ Left "Handle is empty"
+    False -> let req = requestDec $ fromStrict msg 
+             in return $ Right req
+
+
+
+sendRequest :: Handle -> KVRequest -> IO ()
+sendRequest h req = do
+  IO.putStr $ (show req) ++ ['\n']
+  C8.hPutStrLn h $ toStrict (encode req)
 
 {-!
 deriving instance Binary KVRequest

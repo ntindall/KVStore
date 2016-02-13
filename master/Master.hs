@@ -8,6 +8,7 @@ import Network
 
 import Data.Binary as Binary
 import Data.ByteString.Lazy as B
+import Data.ByteString.Char8 as C8
 
 import Control.Exception
 
@@ -25,25 +26,23 @@ main = do
 runKVMaster :: Lib.Config -> IO ()
 runKVMaster cfg = do 
   s <- listenOn (Lib.masterPortId cfg)
+  --todo, need to fork client thread (this one, and another one for
+  --handling responses from slaves)
+  processRequests s cfg
+
+processRequests :: Socket -> Lib.Config ->  IO()
+processRequests s cfg = do
   (h, hostName, portNumber) <- accept s
+  req <- getRequest h
 
-  processRequests h cfg
-  hClose h
+  case req of 
+    Left errmsg -> do
+      IO.putStr errmsg
+    Right req   -> do 
+      sequence $ forwardRequest req cfg
+      hClose h
 
-processRequests :: Handle -> Lib.Config ->  IO()
-processRequests h cfg =
-  msg <- B.hGetContents h
-
-  traceIO $show msg
-
-  let request = (Binary.decode msg) :: KVRequest --a KVRequest
-
-  B.putStr (key request) --(Binary.decode msg) --print the message
-  -- todo... threading???
-
-  sequence $ forwardRequest request cfg
-
-  processRequests h cfg
+      processRequests s cfg
 
 forwardRequest :: KVRequest                         --request to be forwarded
                -> Lib.Config                        --ring configuration
@@ -51,5 +50,5 @@ forwardRequest :: KVRequest                         --request to be forwarded
 forwardRequest req cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
   where forwardToNode (name, portId) = do
           slaveH <- connectTo name portId
-          B.hPut slaveH (Binary.encode req)
+          sendRequest slaveH req
           hClose slaveH
