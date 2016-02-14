@@ -4,10 +4,14 @@ module Main where
 
 import qualified Lib as Lib
 
-import qualified Data.Binary as Binary
+
+import Control.Monad
+
 import Data.ByteString.Lazy as B
 import Data.ByteString.Char8 as C8
+import Data.Word as W
 
+import System.Random
 import System.Environment
 import System.IO as IO
 import Network
@@ -44,4 +48,25 @@ issueRequests cfg = do
 
 
 makeRequest :: IO (KVMessage)
-makeRequest = return $ KVRequest (Get "ExampleRequest")
+makeRequest = do
+  rstr1 <- randomString
+  rstr2 <- randomString
+  return $ KVRequest (PutReq rstr1 rstr2)
+
+------------------------------------
+--for now
+--https://stackoverflow.com/questions/20889729/how-to-properly-generate-a-random-bytestring-in-haskell
+randomBytes :: Int -> StdGen -> [W.Word8]
+randomBytes 0 _ = []
+randomBytes count g = fromIntegral value:randomBytes (count - 1) nextG
+                      where (value, nextG) = next g
+
+randomByteString :: Int -> StdGen -> B.ByteString
+randomByteString count g = B.pack $ randomBytes count g
+
+
+randomString :: IO B.ByteString
+randomString = do
+  g <- getStdGen
+  let bytestring = randomByteString 12 g
+  return bytestring

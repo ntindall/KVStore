@@ -18,8 +18,8 @@ library
   exposed-modules:     Lib, KVProtocol
   build-depends:       base >= 4.7 && < 5
                      , network
-                     , binary
                      , bytestring
+                     , cereal
   default-language:    Haskell2010
 
 executable kvstore-master
@@ -29,7 +29,6 @@ executable kvstore-master
   build-depends:       base
                      , kvstore
                      , network
-                     , binary
                      , bytestring
   default-language:    Haskell2010
 
@@ -40,7 +39,6 @@ executable kvstore-slave
   build-depends:       base
                      , kvstore
                      , network
-                     , binary
                      , bytestring
   default-language:    Haskell2010
 
@@ -51,8 +49,8 @@ executable kvstore-client
   build-depends:       base
                      , kvstore
                      , network
-                     , binary
                      , bytestring
+                     , random
   default-language:    Haskell2010
 
 test-suite kvstore-test

@@ -6,7 +6,6 @@ import Lib
 import System.IO as IO
 import Network
 
-import Data.Binary as Binary
 import Data.ByteString.Lazy as B
 import Data.ByteString.Char8 as C8
 
@@ -52,4 +51,3 @@ forwardRequest req cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
           slaveH <- connectTo name portId
           sendMessage slaveH req
           hClose slaveH
-          

@@ -13,6 +13,7 @@ import Data.ByteString.Char8 as C8
 
 import Control.Exception
 import Control.Concurrent
+import Control.Concurrent.Chan
 
 import Debug.Trace
 
@@ -36,24 +37,27 @@ runKVSlave cfg slaveId = do
     let (slaveName, slavePortId) = (Lib.slaveConfig cfg) !! slaveId
     s <- listenOn slavePortId
 
-    forkIO $ sendResponses s cfg -- fork a child
-    processMessages s cfg
+    channel <- newChan 
+    forkIO $ sendResponses s channel cfg -- fork a child
+    processMessages s channel cfg
     return ()
 
 processMessages :: Socket
+                -> Chan KVMessage
                 -> Lib.Config
                 -> IO()
-processMessages s cfg =
+processMessages s channel cfg =
   bracket (accept s)
           (\(h,_,_) -> do
             hClose h
-            processMessages s cfg)
+            processMessages s channel cfg)
           (\(h, hostName, portNumber) -> do
               req <- getMessage h
               IO.putStr $ (show req) --print the message 
           )
 
 sendResponses :: Socket
+              -> Chan KVMessage
               -> Lib.Config
               -> IO()
-sendResponses s cfg = return ()
+sendResponses s channel cfg = return ()

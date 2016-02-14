@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 module KVProtocol
   (
@@ -11,10 +12,12 @@ module KVProtocol
   , sendMessage
   ) where
 
-import Data.Binary
+import Data.Serialize as CEREAL
 import Data.ByteString.Lazy  as B
 import Data.ByteString.Char8 as C8
 import Debug.Trace
+
+import GHC.Generics (Generic)
 
 import Network
 import System.IO as IO
@@ -23,14 +26,14 @@ type KVKey = B.ByteString
 
 type KVVal = B.ByteString
 
-data KVRequest = Get {
+data KVRequest = GetReq {
                   key :: KVKey
                 }
-               | Put {
+               | PutReq {
                   key :: KVKey
                 , val :: KVVal
                 }
-  deriving (Eq, Show)
+  deriving (Generic, Show)
 
 data KVResponse = KVSuccess {
                     obj :: KVObject
@@ -38,7 +41,7 @@ data KVResponse = KVSuccess {
                 | KVFailure {
                     errorMsg :: B.ByteString
                   }
-  deriving (Eq, Show)
+  deriving (Generic, Show)
 
 data KVMessage = KVResponse {
                   response :: KVResponse
@@ -46,99 +49,28 @@ data KVMessage = KVResponse {
                | KVRequest {
                   request :: KVRequest
                 }
-  deriving (Eq, Show)
+  deriving (Generic, Show)
 
 data KVObject = KBObject B.ByteString B.ByteString
-  deriving (Eq, Show)
+  deriving (Generic, Show)
 
-decodeMsg :: B.ByteString -> KVMessage
-decodeMsg b = (decode b) :: KVMessage
+instance Serialize KVRequest
+instance Serialize KVObject
+instance Serialize KVMessage
+instance Serialize KVResponse
+
+
+decodeMsg :: B.ByteString -> Either String KVMessage
+decodeMsg b = traceShow b $ CEREAL.decodeLazy b
 
 getMessage :: Handle -> IO(Either String KVMessage)
 getMessage h = do
-  msg <- C8.hGetLine h
-  case (C8.null msg) of
+  bytes <- C8.hGetContents h
+  case (C8.null bytes) of
     True -> return $ Left "Handle is empty"
-    False -> let req = decodeMsg $ fromStrict msg 
-             in return $ Right req
-
-
+    False -> return $ decodeMsg (fromStrict bytes) 
 
 sendMessage :: Handle -> KVMessage -> IO ()
 sendMessage h req = do
   IO.putStr $ (show req) ++ ['\n']
-  C8.hPutStrLn h $ toStrict (encode req)
-
-{-!
-deriving instance Binary KVRequest
-deriving instance Binary KVResponse
-deriving instance Binary KVMessage
-deriving instance Binary KVObject
-!-}
-
--- stack exec derive -- -a src/KVProtocol.hs 
--- GENERATED START
-
- 
-instance Binary KVRequest where
-        put x
-          = case x of
-                Get x1 -> do putWord8 0
-                             put x1
-                Put x1 x2 -> do putWord8 1
-                                put x1
-                                put x2
-        get
-          = do i <- getWord8
-               case i of
-                   0 -> do x1 <- get
-                           return (Get x1)
-                   1 -> do x1 <- get
-                           x2 <- get
-                           return (Put x1 x2)
-                   _ -> error "Corrupted binary data for KVRequest"
-
- 
-instance Binary KVResponse where
-        put x
-          = case x of
-                KVSuccess x1 -> do putWord8 0
-                                   put x1
-                KVFailure x1 -> do putWord8 1
-                                   put x1
-        get
-          = do i <- getWord8
-               case i of
-                   0 -> do x1 <- get
-                           return (KVSuccess x1)
-                   1 -> do x1 <- get
-                           return (KVFailure x1)
-                   _ -> error "Corrupted binary data for KVResponse"
-
- 
-instance Binary KVMessage where
-        put x
-          = case x of
-                KVResponse x1 -> do putWord8 0
-                                    put x1
-                KVRequest x1 -> do putWord8 1
-                                   put x1
-        get
-          = do i <- getWord8
-               case i of
-                   0 -> do x1 <- get
-                           return (KVResponse x1)
-                   1 -> do x1 <- get
-                           return (KVRequest x1)
-                   _ -> error "Corrupted binary data for KVMessage"
-
- 
-instance Binary KVObject where
-        put (KBObject x1 x2)
-          = do put x1
-               put x2
-        get
-          = do x1 <- get
-               x2 <- get
-               return (KBObject x1 x2)
--- GENERATED STOP
+  C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy req)
