@@ -23,31 +23,47 @@ import Network
 import System.IO as IO
 
 type KVKey = B.ByteString
-
 type KVVal = B.ByteString
 
 data KVRequest = GetReq {
-                  key :: KVKey
+                  reqkey :: KVKey
                 }
                | PutReq {
-                  key :: KVKey
-                , val :: KVVal
+                  putkey :: KVKey
+                , putval :: KVVal
                 }
   deriving (Generic, Show)
 
 data KVResponse = KVSuccess {
-                    obj :: KVObject
+                    key :: KVKey
+                  , val :: KVVal
                   }
                 | KVFailure {
                     errorMsg :: B.ByteString
                   }
   deriving (Generic, Show)
 
+data KVDecision = Commit | Abort
+  deriving (Generic, Show)
+
 data KVMessage = KVResponse {
-                  response :: KVResponse
+                  txn_id   :: Int
+                , response :: KVResponse
                 }
                | KVRequest {
-                  request :: KVRequest
+                  txn_id   :: Int
+                , request :: KVRequest
+                }
+               | KVVote {
+                  txn_id   :: Int                 
+                , vote :: Bool
+                }
+               | KVAck {
+                  txn_id   :: Int
+               }
+               | KVDecision {
+                  txn_id   :: Int
+                , decision :: KVDecision
                 }
   deriving (Generic, Show)
 
@@ -58,10 +74,11 @@ instance Serialize KVRequest
 instance Serialize KVObject
 instance Serialize KVMessage
 instance Serialize KVResponse
+instance Serialize KVDecision
 
 
 decodeMsg :: B.ByteString -> Either String KVMessage
-decodeMsg b = traceShow b $ CEREAL.decodeLazy b
+decodeMsg b = CEREAL.decodeLazy b
 
 getMessage :: Handle -> IO(Either String KVMessage)
 getMessage h = do
@@ -71,6 +88,5 @@ getMessage h = do
     False -> return $ decodeMsg (fromStrict bytes) 
 
 sendMessage :: Handle -> KVMessage -> IO ()
-sendMessage h req = do
-  IO.putStr $ (show req) ++ ['\n']
-  C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy req)
+sendMessage h msg = do
+  C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy msg)

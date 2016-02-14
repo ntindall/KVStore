@@ -22,6 +22,7 @@ data Mode = Local
 
 data Config = Config { masterHostName :: HostName
                      , masterPortId   :: PortID
+                     , clientConfig   :: [(HostName, PortID)]
                      , slaveConfig    :: [(HostName, PortID)]
                      , slaveNumber    :: Maybe Int
                      }
@@ -55,7 +56,8 @@ parseArguments = do
       in case (isLocal) of
         True -> return $ Just Config { masterHostName = "localHost"
                                      , masterPortId   = (PortNumber 1063)
-                                     , slaveConfig    = [("localhost", (PortNumber 1064))]
+                                     , clientConfig   = [("localHost", PortNumber 2045)] --TODO ALLOW DYNAMIC REGISTRATION OF CLIENTS
+                                     , slaveConfig    = slaveCfg
                                      , slaveNumber = slaveN
                                      }
         False -> return Nothing

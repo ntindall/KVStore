@@ -27,27 +27,41 @@ runKVMaster cfg = do
   s <- listenOn (Lib.masterPortId cfg)
   --todo, need to fork client thread (this one, and another one for
   --handling responses from slaves)
-  processRequests s cfg
+  processMessages s cfg
 
-processRequests :: Socket -> Lib.Config ->  IO()
-processRequests s cfg = do
+processMessages :: Socket -> Lib.Config ->  IO()
+processMessages s cfg = do
   (h, hostName, portNumber) <- accept s
-  req <- getMessage h
+  msg <- getMessage h
 
-  case req of 
+  case msg of 
     Left errmsg -> do
       IO.putStr errmsg
-    Right req   -> do 
-      sequence $ forwardRequest req cfg
-      hClose h
+    Right kvMsg -> 
+      case kvMsg of 
+        (KVRequest _ _) -> do
+          sequence $ forwardToRing kvMsg cfg
+          return ()
+        (KVResponse _ _) -> forwardToClient kvMsg cfg
+        _ -> undefined
 
-      processRequests s cfg
+  hClose h
+  processMessages s cfg
 
-forwardRequest :: KVMessage                         --request to be forwarded
-               -> Lib.Config                        --ring configuration
-               -> [IO()]                          
-forwardRequest req cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
+forwardToRing :: KVMessage                         --request to be forwarded
+              -> Lib.Config                        --ring configuration
+              -> [IO()]                          
+forwardToRing msg cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
   where forwardToNode (name, portId) = do
           slaveH <- connectTo name portId
-          sendMessage slaveH req
+          sendMessage slaveH msg
           hClose slaveH
+
+forwardToClient :: KVMessage
+                -> Lib.Config
+                -> IO()
+forwardToClient msg cfg = do
+  let clientCfg = Prelude.head $ Lib.clientConfig cfg
+  clientH <- connectTo (fst clientCfg) (snd clientCfg)
+  sendMessage clientH msg
+  hClose clientH
