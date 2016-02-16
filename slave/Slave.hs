@@ -7,6 +7,7 @@ import System.IO as IO
 import Network
 import Data.Maybe
 import Data.List as List
+import qualified Data.Map.Strict as Map
 
 import Data.ByteString.Lazy as B
 import Data.ByteString.Char8 as C8
@@ -14,6 +15,9 @@ import Data.ByteString.Char8 as C8
 import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.Chan
+import Control.Arrow as CA
+
+import Control.Monad
 
 import Debug.Trace
 
@@ -61,6 +65,14 @@ processMessages s channel cfg =
                    msg
           )
 
+writeKVList :: [(String, String)] -> String
+writeKVList kvstore = List.intercalate "\n" $ Prelude.map helper kvstore
+  where helper (k,v) = show k ++ "=" ++ show v
+
+readKVList :: String -> [(String, String)]
+readKVList = Prelude.map parseField . Prelude.lines
+  where parseField = second (Prelude.drop 1) . Prelude.break (== '=')
+
 sendResponses :: Chan KVMessage
               -> Lib.Config
               -> IO()
@@ -85,11 +97,16 @@ handleRequest cfg msg = do
       field_request = request msg
 
   case field_request of
-      GetReq key     ->
-        sendMessage h (KVResponse field_txn (KVSuccess key "Echo"))
-      PutReq key _ -> 
-        sendMessage h (KVResponse field_txn (KVSuccess key "Echo"))
-
+      GetReq key     -> do
+        kvMap <- liftM readKVList $ Prelude.readFile "kvstore.txt"
+        case (Map.lookup (C8.unpack $ B.toStrict key) $ Map.fromList kvMap) of
+          Nothing -> sendMessage h (KVResponse field_txn (KVSuccess key "Nothing"))
+          Just val -> sendMessage h (KVResponse field_txn (KVSuccess key $ B.fromStrict $ C8.pack val))
+      PutReq key val -> do
+        kvMap <- liftM readKVList $ Prelude.readFile "kvstore.txt"
+        let updatedKvMap = Map.insert (C8.unpack $ B.toStrict key) (C8.unpack $ B.toStrict val) (Map.fromList kvMap)
+        Prelude.writeFile (writeKVList $ Map.toList updatedKvMap) "kvstore.txt"
+        sendMessage h (KVResponse field_txn (KVSuccess key val))
 
   IO.hClose h
   
