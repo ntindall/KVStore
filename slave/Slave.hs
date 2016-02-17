@@ -10,7 +10,7 @@ import Data.List as List
 import qualified Data.Map.Strict as Map
 
 import Data.ByteString.Lazy as B
-import Data.ByteString.Char8 as C8
+import Data.ByteString.Lazy.Char8 as C8
 
 import Control.Exception
 import Control.Concurrent
@@ -65,13 +65,13 @@ processMessages s channel cfg =
                    msg
           )
 
-writeKVList :: [(String, String)] -> String
-writeKVList kvstore = List.intercalate "\n" $ Prelude.map helper kvstore
-  where helper (k,v) = show k ++ "=" ++ show v
+writeKVList :: [(B.ByteString, B.ByteString)] -> B.ByteString
+writeKVList kvstore = C8.intercalate (C8.pack "\n") $ Prelude.map helper kvstore
+  where helper (k,v) = C8.concat [k, (C8.pack "="), v]
 
-readKVList :: String -> [(String, String)]
-readKVList = Prelude.map parseField . Prelude.lines
-  where parseField = second (Prelude.drop 1) . Prelude.break (== '=')
+readKVList :: B.ByteString -> [(B.ByteString, B.ByteString)]
+readKVList = Prelude.map parseField . C8.lines
+  where parseField = second (C8.drop 1) . C8.break (== '=')
 
 sendResponses :: Chan KVMessage
               -> Lib.Config
@@ -98,14 +98,15 @@ handleRequest cfg msg = do
 
   case field_request of
       GetReq key     -> do
-        kvMap <- liftM readKVList $ Prelude.readFile "kvstore.txt"
-        case (Map.lookup (C8.unpack $ B.toStrict key) $ Map.fromList kvMap) of
+        kvMap <- liftM readKVList $ B.readFile "kvstore.txt"
+        case (Map.lookup key $ Map.fromList kvMap) of
           Nothing -> sendMessage h (KVResponse field_txn (KVSuccess key "Nothing"))
-          Just val -> sendMessage h (KVResponse field_txn (KVSuccess key $ B.fromStrict $ C8.pack val))
+          Just val -> sendMessage h (KVResponse field_txn (KVSuccess key val))
       PutReq key val -> do
-        kvMap <- liftM readKVList $ Prelude.readFile "kvstore.txt"
-        let updatedKvMap = Map.insert (C8.unpack $ B.toStrict key) (C8.unpack $ B.toStrict val) (Map.fromList kvMap)
-        Prelude.writeFile (writeKVList $ Map.toList updatedKvMap) "kvstore.txt"
+        kvMap <- liftM readKVList $ B.readFile "kvstore.txt"
+        let updatedKvMap = Map.insert key val (Map.fromList kvMap)
+        traceIO $ show updatedKvMap
+        B.writeFile "kvstore.txt" (writeKVList $ Map.toList updatedKvMap)
         sendMessage h (KVResponse field_txn (KVSuccess key val))
 
   IO.hClose h
