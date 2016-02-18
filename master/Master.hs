@@ -14,13 +14,15 @@ import qualified Data.Set as Set
 import Data.Maybe
 
 import Control.Exception
-
+import Control.Monad.State
 import KVProtocol
 
 import Debug.Trace
 
 data MasterState = MasterState {
               --add an mvar in here
+              socket :: Socket,
+              cfg :: Lib.Config,
               voteMap :: Map.Map Int (Set.Set Int)
             }
 
@@ -36,57 +38,54 @@ runKVMaster cfg = do
   s <- listenOn (Lib.masterPortId cfg)
   --todo, need to fork client thread (this one, and another one for
   --handling responses from slaves)
-  let state = MasterState Map.empty
+  _ <- runStateT processMessages (MasterState s cfg Map.empty)
+  return ()                     -- todo: change this to be cleaner - should just not return anything?
 
-  processMessages s cfg state
+processMessage :: KVMessage -> StateT MasterState IO ()
+processMessage (KVVote _ _ VoteAbort request) = undefined
+processMessage (KVVote txn_id slave_id VoteReady request) = do
+  state <- get
+  let oldMap = voteMap state
+      oldVotes = Map.lookup txn_id oldMap
+      oldMap' = case oldVotes of
+                  Nothing -> Map.insert txn_id Set.empty oldMap
+                  (Just _) -> oldMap
+      oldVotes' = Map.lookup txn_id oldMap'
+      newSet = Set.insert slave_id $ fromJust oldVotes'
 
+  if Set.size newSet == (Prelude.length $ Lib.slaveConfig $ cfg state)
+  then liftIO $ sequence $ forwardToRing (KVDecision txn_id DecisionCommit request) (cfg state) 
+       --TODO, NEEd to remove the txn_id from the map? after everyone has acked 
+  else liftIO $ sequence $ [return ()]
 
+  let state' = MasterState (socket state) (cfg state) (Map.insert txn_id newSet oldMap)
 
-processMessages :: Socket -> Lib.Config -> MasterState -> IO()
-processMessages s cfg state = do
-  (h, hostName, portNumber) <- accept s
-  msg <- getMessage h
+  put state'
 
-  traceIO $ show msg
+processMessage kvMsg@(KVResponse _ _ _) = do
+  state <- get
+  liftIO $ forwardToClient kvMsg (cfg state)
 
-  case msg of 
-    Left errmsg -> do
-      IO.putStr errmsg
-    Right kvMsg -> 
-      case kvMsg of 
-        (KVRequest _ _) -> do
-          sequence $ forwardToRing kvMsg cfg
-          return ()
-        (KVResponse _ _ _) -> forwardToClient kvMsg cfg
-        (KVAck txn_id _)      -> forwardToClient (KVAck txn_id Nothing) cfg
-        (KVVote txn_id slave_id vote request) ->
-          case vote of
-            VoteAbort -> undefined --todo, send an abort
-            VoteReady -> do
-              let oldMap = voteMap state
-                  oldVotes = Map.lookup txn_id oldMap
-                  oldMap' = case oldVotes of
-                             Nothing -> Map.insert txn_id Set.empty oldMap
-                             (Just _) -> oldMap
-                  oldVotes' = Map.lookup txn_id oldMap'
-                  newSet = Set.insert slave_id $ fromJust oldVotes'
+processMessage kvMsg@(KVRequest _ _) = do
+  state <- get
+  _ <- liftIO $ sequence $ forwardToRing kvMsg (cfg state) -- todo: these should just not return anything
+  return ()
 
-              if Set.size newSet == (Prelude.length $ Lib.slaveConfig cfg)
-              then sequence $ forwardToRing (KVDecision txn_id DecisionCommit request) cfg 
-                   --TODO, NEEd to remove the txn_id from the map? after everyone has acked 
-              else sequence $ [return ()]
+processMessage (KVAck txn_id _) = do
+  state <- get
+  _ <- liftIO $ forwardToClient (KVAck txn_id Nothing) (cfg state) -- todo: these should just not return anything
+  return ()
 
-              let state' = MasterState $ Map.insert txn_id newSet oldMap
+processMessage _ = undefined
 
-              hClose h
-              processMessages s cfg state'
-
-
-        _ -> undefined
-
-  hClose h
-  processMessages s cfg state
-
+processMessages :: StateT MasterState IO ()
+processMessages = do
+  state <- get
+  (h, _, _) <- liftIO $ accept $ socket state
+  msg <- liftIO $ getMessage h
+  either (\errmsg -> liftIO $ IO.putStr errmsg) processMessage msg
+  liftIO $ hClose h
+  processMessages
 
 forwardToRing :: KVMessage                         --request to be forwarded
               -> Lib.Config                        --ring configuration
