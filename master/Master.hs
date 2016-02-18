@@ -12,13 +12,15 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Control.Exception
-
+import Control.Monad.State
 import KVProtocol
 
 import Debug.Trace
 
 data MasterState = MasterState {
               --add an mvar in here
+              socket :: Socket,
+              cfg :: Lib.Config,
               voteMap :: Map.Map Int (Set.Set Int)
             }
 
@@ -34,56 +36,45 @@ runKVMaster cfg = do
   s <- listenOn (Lib.masterPortId cfg)
   --todo, need to fork client thread (this one, and another one for
   --handling responses from slaves)
-  let state = MasterState Map.empty
+  _ <- runStateT processMessages (MasterState s cfg Map.empty)
+  return ()                     -- todo: change this to be cleaner - should just not return anything?
 
-  processMessages s cfg state
+processMessage :: KVMessage -> StateT MasterState IO ()
+processMessage (KVVote _ _ VoteAbort) = undefined
+processMessage (KVVote txn_id slave_id VoteReady) = do
+  state <- get
+  let oldMap = voteMap state
+      oldVotes = Map.lookup txn_id oldMap
+      config = cfg state
+      skt = socket state
+  case oldVotes of
+    Just set -> do
+      let newSet = (Set.insert slave_id set)
+      if Set.size newSet == (Prelude.length $ Lib.slaveConfig config)
+        then liftIO (sequence $ forwardToRing (KVDecision txn_id DecisionCommit) config)
+        else liftIO (sequence $ [return ()])
+      put $ MasterState skt config $ Map.insert txn_id newSet oldMap
 
+    Nothing -> put (MasterState skt config (Map.insert txn_id (Set.insert slave_id Set.empty) oldMap))
 
+processMessage kvMsg@(KVResponse _ _ _) = do
+  state <- get
+  liftIO $ forwardToClient kvMsg (cfg state)
+processMessage kvMsg@(KVRequest _ _) = do
+  state <- get
+  _ <- liftIO $ sequence $ forwardToRing kvMsg (cfg state) -- todo: these should just not return anything
+  return ()
+processMessage (KVAck _ _) = undefined
+processMessage _ = undefined
 
-processMessages :: Socket -> Lib.Config -> MasterState -> IO()
-processMessages s cfg state = do
-  (h, hostName, portNumber) <- accept s
-  msg <- getMessage h
-
-  case msg of 
-    Left errmsg -> do
-      IO.putStr errmsg
-    Right kvMsg -> 
-      case kvMsg of 
-        (KVRequest _ _) -> do
-          sequence $ forwardToRing kvMsg cfg
-          return ()
-        (KVResponse _ _ _) -> forwardToClient kvMsg cfg
-        (KVAck _ _)      -> undefined
-        (KVVote txn_id slave_id vote) ->
-          case vote of
-            VoteAbort -> undefined --todo, send an abort
-            VoteReady -> do
-              let oldMap = voteMap state
-                  oldVotes = Map.lookup txn_id oldMap
-
-              case oldVotes of
-                Just set -> do
-                  let newSet = (Set.insert slave_id set)
-
-                  if Set.size newSet == (Prelude.length $ Lib.slaveConfig cfg)
-                  then sequence $ forwardToRing (KVDecision txn_id DecisionCommit) cfg
-                  else sequence $ [return ()]
-
-                  let state' = MasterState $ Map.insert txn_id newSet oldMap
-
-                  hClose h
-                  processMessages s cfg state'
-                Nothing -> do
-                  let state' = MasterState $ Map.insert txn_id (Set.insert slave_id Set.empty) oldMap
-                  hClose h
-                  processMessages s cfg state'
-
-        _ -> undefined
-
-  hClose h
-  processMessages s cfg state
-
+processMessages :: StateT MasterState IO ()
+processMessages = do
+  state <- get
+  (h, _, _) <- liftIO $ accept $ socket state
+  msg <- liftIO $ getMessage h
+  either (\errmsg -> liftIO $ IO.putStr errmsg) processMessage msg
+  liftIO $ hClose h
+  processMessages
 
 forwardToRing :: KVMessage                         --request to be forwarded
               -> Lib.Config                        --ring configuration
