@@ -9,6 +9,7 @@ import Control.Monad
 
 import Data.ByteString.Lazy as B
 import Data.ByteString.Lazy.Char8 as C8
+import Data.Maybe
 import Data.Word as W
 
 import System.Random
@@ -36,30 +37,56 @@ runKVClient cfg = do
 
   s <- listenOn (snd clientCfg) --todo, make this dynamic
 
-  issueRequests cfg s
+  issueRequests cfg s 0
+
+parseInput :: B.ByteString -> Int -> IO(Maybe KVMessage)
+parseInput text txn_id = do
+  let pieces = C8.split ' ' text
+  traceIO $ show pieces 
+  if (Prelude.length pieces > 1)
+  then let reqType = pieces !! 0
+           key = pieces !! 1
+           val | Prelude.length pieces >= 3 = pieces !! 2
+               | otherwise = B.empty
+
+
+           in if traceShow reqType $ (reqType == "PUT")
+              then return $ Just (KVRequest txn_id (PutReq key val))
+              else return $ Just (KVRequest txn_id (GetReq key))
+  else return Nothing
+
 
 issueRequests :: Lib.Config
               -> Socket
+              -> Int
               -> IO()
-issueRequests cfg s = do
-  h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
-  
-  kvReq <- makeRequest
-  traceIO (show kvReq)
-  sendMessage h kvReq
+issueRequests cfg s txn_id = do
 
-  (h', hostName, portNumber) <- accept s
-  msg <- getMessage h'
+  text <- IO.getLine
+  request <- parseInput (C8.pack text) txn_id
+  if isNothing request
+  then do
+    issueRequests cfg s txn_id
+  else do
+    let request' = fromJust request
+    h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
+    
+   -- kvReq <- makeRequest
+    traceIO (show request')
+    sendMessage h request'
 
-  case msg of 
-    Left errmsg -> do
-      IO.putStr $ errmsg ++ ['\n']
-    Right kvMsg ->
-      IO.putStr $ (show kvMsg) ++ ['\n']
-  
-  IO.hClose h'
+    (h', hostName, portNumber) <- accept s
+    msg <- getMessage h'
 
-  issueRequests cfg s
+    case msg of 
+      Left errmsg -> do
+        IO.putStr $ errmsg ++ ['\n']
+      Right kvMsg ->
+        IO.putStr $ (show kvMsg) ++ ['\n']
+    
+    IO.hClose h'
+
+    issueRequests cfg s (txn_id + 1)
 
 
 makeRequest :: IO (KVMessage)

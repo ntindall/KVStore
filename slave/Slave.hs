@@ -23,6 +23,9 @@ import Debug.Trace
 
 import KVProtocol
 
+--- todo, touch file when slave registers
+-- todo, slave registration
+
 type SlaveId = Int
 
 main :: IO ()
@@ -73,6 +76,9 @@ readKVList :: B.ByteString -> [(B.ByteString, B.ByteString)]
 readKVList = Prelude.map parseField . C8.lines
   where parseField = second (C8.drop 1) . C8.break (== '=')
 
+persistentFileName :: Int -> String                                                   --todo, hacky
+persistentFileName slaveId = "database/kvstore_" ++ (show slaveId) ++ ".txt"
+
 sendResponses :: Chan KVMessage
               -> Lib.Config
               -> IO()
@@ -101,15 +107,15 @@ handleRequest cfg msg = do
       mySlaveId = getMyId cfg
 
   case field_request of
-      GetReq key     -> do
-        kvMap <- liftM readKVList $ B.readFile "kvstore.txt"
-        case (Map.lookup key $ Map.fromList kvMap) of
-          Nothing -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
-          Just val -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
       PutReq key val -> do
         -- LOG READY, <timestamp, txn_id, key, newval>
         sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
         --vote abort if invalid key value
+      GetReq key     -> do
+        kvMap <- liftM readKVList $ B.readFile $ persistentFileName mySlaveId
+        case (Map.lookup key $ Map.fromList kvMap) of
+          Nothing -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
+          Just val -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
 
   IO.hClose h
   
@@ -125,15 +131,15 @@ handleDecision cfg msg = do
   --DEAL WITH ABORT
   --USE BRACKET TO MAKE THIS ATOMIC
   --WRITE TO FILE
-  kvMap <- liftM readKVList $ B.readFile "kvstore.txt"
+  kvMap <- liftM readKVList $ B.readFile $ persistentFileName mySlaveId
   let updatedKvMap = Map.insert key val (Map.fromList kvMap)
   traceIO $ show updatedKvMap
-  B.writeFile "kvstore.txt" (writeKVList $ Map.toList updatedKvMap)
+  B.writeFile (persistentFileName mySlaveId) (writeKVList $ Map.toList updatedKvMap)
   --WRITE TO LOG
   --TODO!!! ! ! ! 
 
   h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
-  sendMessage h (KVAck field_txn mySlaveId)
+  sendMessage h (KVAck field_txn (Just mySlaveId))
   IO.hClose h
 
 handleResponse = undefined

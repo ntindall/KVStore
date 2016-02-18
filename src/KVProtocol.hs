@@ -67,7 +67,7 @@ data KVMessage = KVResponse {
                 }
                | KVAck {
                   txn_id   :: Int --final message, sent by slave
-                , slave_id :: Int
+                , ack_slave_id :: Maybe Int
                }
                | KVVote {
                   txn_id   :: Int -- READY or ABORT, sent by slave

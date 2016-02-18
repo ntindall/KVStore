@@ -58,7 +58,7 @@ processMessages s cfg state = do
           sequence $ forwardToRing kvMsg cfg
           return ()
         (KVResponse _ _ _) -> forwardToClient kvMsg cfg
-        (KVAck _ _)      -> traceIO "ack received"
+        (KVAck txn_id _)      -> forwardToClient (KVAck txn_id Nothing) cfg
         (KVVote txn_id slave_id vote request) ->
           case vote of
             VoteAbort -> undefined --todo, send an abort
