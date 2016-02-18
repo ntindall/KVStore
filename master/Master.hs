@@ -11,6 +11,8 @@ import Data.ByteString.Char8 as C8
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
+import Data.Maybe
+
 import Control.Exception
 
 import KVProtocol
@@ -45,6 +47,8 @@ processMessages s cfg state = do
   (h, hostName, portNumber) <- accept s
   msg <- getMessage h
 
+  traceIO $ show msg
+
   case msg of 
     Left errmsg -> do
       IO.putStr errmsg
@@ -54,30 +58,29 @@ processMessages s cfg state = do
           sequence $ forwardToRing kvMsg cfg
           return ()
         (KVResponse _ _ _) -> forwardToClient kvMsg cfg
-        (KVAck _ _)      -> undefined
-        (KVVote txn_id slave_id vote) ->
+        (KVAck _ _)      -> traceIO "ack received"
+        (KVVote txn_id slave_id vote request) ->
           case vote of
             VoteAbort -> undefined --todo, send an abort
             VoteReady -> do
               let oldMap = voteMap state
                   oldVotes = Map.lookup txn_id oldMap
+                  oldMap' = case oldVotes of
+                             Nothing -> Map.insert txn_id Set.empty oldMap
+                             (Just _) -> oldMap
+                  oldVotes' = Map.lookup txn_id oldMap'
+                  newSet = Set.insert slave_id $ fromJust oldVotes'
 
-              case oldVotes of
-                Just set -> do
-                  let newSet = (Set.insert slave_id set)
+              if Set.size newSet == (Prelude.length $ Lib.slaveConfig cfg)
+              then sequence $ forwardToRing (KVDecision txn_id DecisionCommit request) cfg 
+                   --TODO, NEEd to remove the txn_id from the map? after everyone has acked 
+              else sequence $ [return ()]
 
-                  if Set.size newSet == (Prelude.length $ Lib.slaveConfig cfg)
-                  then sequence $ forwardToRing (KVDecision txn_id DecisionCommit) cfg
-                  else sequence $ [return ()]
+              let state' = MasterState $ Map.insert txn_id newSet oldMap
 
-                  let state' = MasterState $ Map.insert txn_id newSet oldMap
+              hClose h
+              processMessages s cfg state'
 
-                  hClose h
-                  processMessages s cfg state'
-                Nothing -> do
-                  let state' = MasterState $ Map.insert txn_id (Set.insert slave_id Set.empty) oldMap
-                  hClose h
-                  processMessages s cfg state'
 
         _ -> undefined
 

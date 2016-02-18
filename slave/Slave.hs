@@ -84,9 +84,9 @@ sendResponses channel cfg = do
   case message of
     (KVResponse _ _ _) -> handleResponse 
     (KVRequest _ _)    -> handleRequest cfg message
-    (KVVote _ _ _)     -> handleVote --protocol error?
+    (KVVote _ _ _ _)   -> handleVote --protocol error?
     (KVAck _ _)        -> handleAck -- protocol error?
-    (KVDecision _ _)   -> handleDecision 
+    (KVDecision _ _ _)   -> handleDecision cfg message
 
   sendResponses channel cfg
 
@@ -108,16 +108,34 @@ handleRequest cfg msg = do
           Just val -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
       PutReq key val -> do
         -- LOG READY, <timestamp, txn_id, key, newval>
-        -- kvMap <- liftM readKVList $ B.readFile "kvstore.txt"
-        -- let updatedKvMap = Map.insert key val (Map.fromList kvMap)
-        -- traceIO $ show updatedKvMap
-        -- B.writeFile "kvstore.txt" (writeKVList $ Map.toList updatedKvMap)
-        -- sendMessage h (KVResponse field_txn (getMyId cfg) (KVSuccess key (Just val)))
-        sendMessage h (KVVote field_txn mySlaveId VoteReady)
+        sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
+        --vote abort if invalid key value
 
   IO.hClose h
   
+handleDecision :: Lib.Config -> KVMessage -> IO()
+handleDecision cfg msg = do
+  let field_txn  = txn_id msg
+      field_request = request msg
+      mySlaveId = getMyId cfg
+      (key,val) = case field_request of
+                    (PutReq k v) -> (k,v)
+                    (GetReq _) -> undefined -- protocol error
+
+  --DEAL WITH ABORT
+  --USE BRACKET TO MAKE THIS ATOMIC
+  --WRITE TO FILE
+  kvMap <- liftM readKVList $ B.readFile "kvstore.txt"
+  let updatedKvMap = Map.insert key val (Map.fromList kvMap)
+  traceIO $ show updatedKvMap
+  B.writeFile "kvstore.txt" (writeKVList $ Map.toList updatedKvMap)
+  --WRITE TO LOG
+  --TODO!!! ! ! ! 
+
+  h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
+  sendMessage h (KVAck field_txn mySlaveId)
+  IO.hClose h
+
 handleResponse = undefined
 handleVote = undefined
 handleAck = undefined
-handleDecision = undefined

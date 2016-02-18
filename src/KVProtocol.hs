@@ -63,6 +63,7 @@ data KVMessage = KVResponse {
                | KVDecision { -- COMMIT or ABORT, sent by master
                   txn_id   :: Int                 
                 , decision :: KVDecision
+                , request  :: KVRequest
                 }
                | KVAck {
                   txn_id   :: Int --final message, sent by slave
@@ -72,6 +73,7 @@ data KVMessage = KVResponse {
                   txn_id   :: Int -- READY or ABORT, sent by slave
                 , slave_id :: Int
                 , vote     :: KVVote
+                , request  :: KVRequest
                }        
   deriving (Generic, Show)
 
@@ -98,4 +100,5 @@ getMessage h = do
 
 sendMessage :: Handle -> KVMessage -> IO ()
 sendMessage h msg = do
+  traceIO $ "sending " ++ show msg
   C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy msg)
