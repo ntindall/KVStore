@@ -7,3 +7,33 @@
 6. Logging
 7. Testing
 8. High Throughput testing (only GETS / only PUTS / only GETS or PUTS).
+
+
+1. CLIENT ISSUES PUT / GET
+2. MASTER receives message
+   for now just forward to all slaves, todo: consistent hashing.
+3. MASTER sends PREPARE message to slaves in ring.
+4. SLAVE receives prepare message, writes into log.
+    <timestamp, txn_id, READY>
+    <timestamp, txn_id, key, new value>
+5. SLAVE sends READY / ABORT
+    Ready if write succeeded, abort otherwise
+    Only abort if illegal key value or if slave died. 
+6. MASTER receives messages from SLAVES
+   if all are READY, sends COMMIT, else ABORT.
+7. SLAVE receives decision,
+      if COMMIT, then:
+        <ATOMIC>
+        write key value to file 
+        write <timestamp, txn_id, COMMIT> to log
+        <ATOMIC>
+        SENDS ACK.
+      if ABORT, then:
+        SLAVE writes
+        <timestamp, txn_id, ABORT>
+        SEND ACK
+8. If it doesn't send an ACK from each slave, it resends decision to each slave.
+   A slave that is daed needs to come back up, look at its log, rebuild itself,
+   and ACK so everyone can move on.
+
+
