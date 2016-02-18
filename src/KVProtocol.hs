@@ -6,6 +6,8 @@ module KVProtocol
     KVRequest(..)
   , KVResponse(..)
   , KVMessage(..)
+  , KVVote(..)
+  , KVDecision(..)
   , KVKey
   , KVVal
   , getMessage
@@ -36,35 +38,41 @@ data KVRequest = GetReq {
 
 data KVResponse = KVSuccess {
                     key :: KVKey
-                  , val :: KVVal
+                  , val :: Maybe KVVal --Nothing if not found (missing) 
                   }
                 | KVFailure {
                     errorMsg :: B.ByteString
                   }
   deriving (Generic, Show)
 
-data KVDecision = Commit | Abort
+data KVDecision = DecisionCommit | DecisionAbort
+  deriving (Generic, Show)
+
+data KVVote = VoteReady | VoteAbort
   deriving (Generic, Show)
 
 data KVMessage = KVResponse {
                   txn_id   :: Int
+                , slave_id :: Int
                 , response :: KVResponse
                 }
-               | KVRequest {
+               | KVRequest {  -- PREPARE
                   txn_id   :: Int
                 , request :: KVRequest
                 }
-               | KVVote {
+               | KVDecision { -- COMMIT or ABORT, sent by master
                   txn_id   :: Int                 
-                , vote :: Bool
-                }
-               | KVAck {
-                  txn_id   :: Int
-               }
-               | KVDecision {
-                  txn_id   :: Int
                 , decision :: KVDecision
                 }
+               | KVAck {
+                  txn_id   :: Int --final message, sent by slave
+                , slave_id :: Int
+               }
+               | KVVote {
+                  txn_id   :: Int -- READY or ABORT, sent by slave
+                , slave_id :: Int
+                , vote     :: KVVote
+               }        
   deriving (Generic, Show)
 
 data KVObject = KBObject B.ByteString B.ByteString
@@ -75,6 +83,7 @@ instance Serialize KVObject
 instance Serialize KVMessage
 instance Serialize KVResponse
 instance Serialize KVDecision
+instance Serialize KVVote
 
 
 decodeMsg :: B.ByteString -> Either String KVMessage

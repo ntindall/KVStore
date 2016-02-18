@@ -82,32 +82,38 @@ sendResponses channel cfg = do
   --todo, logic about handling this message 
 
   case message of
-    (KVResponse _ _) -> handleResponse 
-    (KVRequest _ _)  -> handleRequest cfg message
-    (KVVote _ _)     -> handleVote --protocol error?
-    (KVAck _)        -> handleAck -- protocol error?
-    (KVDecision _ _) -> handleDecision 
+    (KVResponse _ _ _) -> handleResponse 
+    (KVRequest _ _)    -> handleRequest cfg message
+    (KVVote _ _ _)     -> handleVote --protocol error?
+    (KVAck _ _)        -> handleAck -- protocol error?
+    (KVDecision _ _)   -> handleDecision 
 
   sendResponses channel cfg
+
+getMyId :: Lib.Config -> Int
+getMyId cfg = fromJust $ Lib.slaveNumber cfg
 
 handleRequest :: Lib.Config -> KVMessage -> IO()
 handleRequest cfg msg = do
   h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
   let field_txn  = txn_id msg
       field_request = request msg
+      mySlaveId = getMyId cfg
 
   case field_request of
       GetReq key     -> do
         kvMap <- liftM readKVList $ B.readFile "kvstore.txt"
         case (Map.lookup key $ Map.fromList kvMap) of
-          Nothing -> sendMessage h (KVResponse field_txn (KVSuccess key "Nothing"))
-          Just val -> sendMessage h (KVResponse field_txn (KVSuccess key val))
+          Nothing -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
+          Just val -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
       PutReq key val -> do
-        kvMap <- liftM readKVList $ B.readFile "kvstore.txt"
-        let updatedKvMap = Map.insert key val (Map.fromList kvMap)
-        traceIO $ show updatedKvMap
-        B.writeFile "kvstore.txt" (writeKVList $ Map.toList updatedKvMap)
-        sendMessage h (KVResponse field_txn (KVSuccess key val))
+        -- LOG READY, <timestamp, txn_id, key, newval>
+        -- kvMap <- liftM readKVList $ B.readFile "kvstore.txt"
+        -- let updatedKvMap = Map.insert key val (Map.fromList kvMap)
+        -- traceIO $ show updatedKvMap
+        -- B.writeFile "kvstore.txt" (writeKVList $ Map.toList updatedKvMap)
+        -- sendMessage h (KVResponse field_txn (getMyId cfg) (KVSuccess key (Just val)))
+        sendMessage h (KVVote field_txn mySlaveId VoteReady)
 
   IO.hClose h
   
