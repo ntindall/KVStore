@@ -57,7 +57,7 @@ parseArguments = do
       in case (isLocal) of
         True -> return $ Just Config { masterHostName = "localHost"
                                      , masterPortId   = (PortNumber 1063)
-                                     , clientConfig   = [("localHost", PortNumber 2045)] --TODO ALLOW DYNAMIC REGISTRATION OF CLIENTS
+                                     , clientConfig   = [] --TODO ALLOW DYNAMIC REGISTRATION OF CLIENTS
                                      , slaveConfig    = slaveCfg
                                      , slaveNumber = slaveN
                                      , clientNumber = Nothing -- clients must dynamically register

@@ -103,13 +103,15 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
   state <- get
   let oldConfig = cfg state
       oldClientCfg = Lib.clientConfig oldConfig
-      newClientCfg = oldClientCfg ++ [(hostName, PortNumber $ toEnum portId)]
+      cfgTuple = (hostName, PortNumber $ toEnum portId)
+      newClientCfg = oldClientCfg ++ [cfgTuple]
       newConfig = oldConfig { clientConfig = newClientCfg }
       clientId = (Prelude.length newClientCfg) - 1
 
   put $ MasterState (socket state) newConfig (voteMap state) (ackMap state)
-
---  liftIO $ sendMessage h $ KVAck (clientId, snd txn_id) $ Just clientId
+  clientH <- liftIO $ connectTo (fst cfgTuple) (snd cfgTuple)
+  liftIO $ sendMessage clientH $ KVAck (clientId, snd txn_id) $ Just clientId
+  liftIO $ hClose clientH
 
 processMessage (KVAck txn_id slave_id) = do
   state <- get
@@ -148,6 +150,7 @@ processMessages = do
   state <- get
   (h, _, _) <- liftIO $ accept $ socket state
   --todo forkIO
+  traceShowM $ (show state)
   msg <- liftIO $ getMessage h
   either (\errmsg -> liftIO $ IO.putStr errmsg) processMessage msg
   liftIO $ hClose h
