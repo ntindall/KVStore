@@ -25,6 +25,7 @@ data Config = Config { masterHostName :: HostName
                      , clientConfig   :: [(HostName, PortID)]
                      , slaveConfig    :: [(HostName, PortID)]
                      , slaveNumber    :: Maybe Int
+                     , clientNumber   :: Maybe Int
                      }
         deriving (Show)
 
@@ -59,6 +60,7 @@ parseArguments = do
                                      , clientConfig   = [("localHost", PortNumber 2045)] --TODO ALLOW DYNAMIC REGISTRATION OF CLIENTS
                                      , slaveConfig    = slaveCfg
                                      , slaveNumber = slaveN
+                                     , clientNumber = Nothing -- clients must dynamically register
                                      }
         False -> return Nothing
 

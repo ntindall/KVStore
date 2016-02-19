@@ -6,9 +6,11 @@ import qualified Lib as Lib
 
 
 import Control.Monad
+import Control.Exception
 
 import Data.ByteString.Lazy as B
 import Data.ByteString.Lazy.Char8 as C8
+import Data.Char as Char
 import Data.Maybe
 import Data.Word as W
 
@@ -33,8 +35,9 @@ main = do
 
 runKVClient :: Lib.Config -> IO ()
 runKVClient cfg = do
+  -- cfg' <- registerWithMaster cfg
+  -- let cfg' = cfg
   let clientCfg = Prelude.head $ Lib.clientConfig cfg
-
   s <- listenOn (snd clientCfg) --todo, make this dynamic
 
   issueRequests cfg s 0
@@ -50,10 +53,20 @@ parseInput text txn_id = do
                | otherwise = B.empty
 
 
-           in if traceShow reqType $ (reqType == "PUT")
-              then return $ Just (KVRequest txn_id (PutReq key val))
-              else return $ Just (KVRequest txn_id (GetReq key))
+           in if (reqType == "PUT" || reqType == "put")
+              then return $ Just (KVRequest (0, txn_id) (PutReq key val))
+              else return $ Just (KVRequest (0, txn_id) (GetReq key))
   else return Nothing
+
+-- registerWithMaster :: Lib.Config -> IO(Lib.Config)
+-- registerWithMaster cfg = do
+--   h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
+--   sendMessage h (KVRegistration (0,0) "localhost" 0) --todo check flags
+
+--   response <- getMessage h
+--   case response of
+--     (KVAck (clientId, txn_id) _) -> return cfg { Lib.clientNumber = Just clientId }
+--     _ -> undefined --todo, error handling
 
 
 issueRequests :: Lib.Config
@@ -89,17 +102,17 @@ issueRequests cfg s txn_id = do
     issueRequests cfg s (txn_id + 1)
 
 
-makeRequest :: IO (KVMessage)
-makeRequest = do
-  rstr1 <- randomString
-  rstr2 <- randomString
-  return $ KVRequest 0 (PutReq rstr1 rstr2)
+-- makeRequest :: IO (KVMessage)
+-- makeRequest = do
+--   rstr1 <- randomString
+--   rstr2 <- randomString
+--   return $ KVRequest (0,1) (PutReq rstr1 rstr2)
 
 ------------------------------------
 --for now
 
 --https://stackoverflow.com/questions/17500194/generate-a-random-string-at-compile-time-or-run-time-and-use-it-in-the-rest-of-t
-randomString :: IO B.ByteString
-randomString = do
-  let string = Prelude.take 10 $ randomRs ('a','z') $ UNSAFEIO.unsafePerformIO newStdGen
-  return $ C8.pack string
+-- randomString :: IO B.ByteString
+-- randomString = do
+--   let string = Prelude.take 10 $ randomRs ('a','z') $ UNSAFEIO.unsafePerformIO newStdGen
+--   return $ C8.pack string

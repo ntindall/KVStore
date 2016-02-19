@@ -25,13 +25,13 @@ data MasterState = MasterState {
                 , cfg :: Lib.Config
                   --the votemap contains as a key the txn id, and has as a value
                   --the set of slaves that have responded with a READY vote
-                , voteMap :: Map.Map Int (Set.Set Int)
+                , voteMap :: Map.Map KVTxnId (Set.Set Int)
                   --the ackMap contains as a key the txn id, and has as a value
                   --the set of slaves that have responded with an ACK
                   --
                   --when the last ACK is received, the master removes the txn_id
                   --from both Maps and sends an acknowledgement to the client.
-                , ackMap  :: Map.Map Int (Set.Set Int)
+                , ackMap  :: Map.Map KVTxnId (Set.Set Int)
                 }
   deriving (Show)
 
@@ -65,7 +65,6 @@ processMessage (KVVote txn_id slave_id VoteReady request) = do
 
   if Set.size newSet == (Prelude.length $ Lib.slaveConfig $ cfg state)
   then liftIO $ sequence $ sendMsgToRing (KVDecision txn_id DecisionCommit request) (cfg state) 
-       --TODO, NEEd to remove the txn_id from the map? after everyone has acked 
   else liftIO $ sequence $ [return ()]
 
   let state' = MasterState (socket state) (cfg state) newVoteMap (ackMap state)
@@ -94,12 +93,23 @@ processMessage kvMsg@(KVResponse txn_id slave_id _) = do
                         _    -> Map.insert txn_id hasRespondedSet' oldAckMap
 
       put $ MasterState (socket state) (cfg state) (voteMap state) newAckMap'
-      return ()
 
 processMessage kvMsg@(KVRequest _ _) = do
   state <- get
-  _ <- liftIO $ sequence $ sendMsgToRing kvMsg (cfg state) -- todo: these should just not return anything
+  liftIO $ sequence $ sendMsgToRing kvMsg (cfg state)
   return ()
+
+processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
+  state <- get
+  let oldConfig = cfg state
+      oldClientCfg = Lib.clientConfig oldConfig
+      newClientCfg = oldClientCfg ++ [(hostName, PortNumber $ toEnum portId)]
+      newConfig = oldConfig { clientConfig = newClientCfg }
+      clientId = (Prelude.length newClientCfg) - 1
+
+  put $ MasterState (socket state) newConfig (voteMap state) (ackMap state)
+
+--  liftIO $ sendMessage h $ KVAck (clientId, snd txn_id) $ Just clientId
 
 processMessage (KVAck txn_id slave_id) = do
   state <- get
@@ -123,13 +133,12 @@ processMessage (KVAck txn_id slave_id) = do
         state' = MasterState (socket state) (cfg state) newVoteMap newAckMap
 
     put state'
-    _ <- liftIO $ sendMsgToClient (KVAck txn_id Nothing) (cfg state) -- todo: these should just not return anything
-    return ()
+    liftIO $ sendMsgToClient (KVAck txn_id Nothing) (cfg state) -- todo: these should just not return anything
 
 
   else do
     put $ MasterState (socket state) (cfg state) (voteMap state) newAckMap
-    return () --we need to wait for more acks
+   -- return () --we need to wait for more acks
 
 
 processMessage _ = undefined
@@ -157,7 +166,8 @@ sendMsgToClient :: KVMessage
                 -> Lib.Config
                 -> IO()
 sendMsgToClient msg cfg = do
-  let clientCfg = Prelude.head $ Lib.clientConfig cfg
+  let clientId = fst (txn_id msg)
+      clientCfg = Lib.clientConfig cfg !! clientId
   clientH <- connectTo (fst clientCfg) (snd clientCfg)
   sendMessage clientH msg
   hClose clientH

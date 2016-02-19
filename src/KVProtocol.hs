@@ -10,6 +10,7 @@ module KVProtocol
   , KVDecision(..)
   , KVKey
   , KVVal
+  , KVTxnId
   , getMessage
   , sendMessage
   ) where
@@ -26,6 +27,7 @@ import System.IO as IO
 
 type KVKey = B.ByteString
 type KVVal = B.ByteString
+type KVTxnId = (Int, Int) -- (client_id, txn_id)
 
 -- TODO, with more clients, need txn_id to be (txn_id, client_id) tuples
 
@@ -53,26 +55,31 @@ data KVDecision = DecisionCommit | DecisionAbort
 data KVVote = VoteReady | VoteAbort
   deriving (Generic, Show)
 
-data KVMessage = KVResponse {
-                  txn_id   :: Int
+data KVMessage = KVRegistration {
+                  txn_id :: KVTxnId
+                , hostname :: HostName
+                , portId   :: Int
+                }
+                | KVResponse {
+                  txn_id   :: KVTxnId
                 , slave_id :: Int
                 , response :: KVResponse
                 }
                | KVRequest {  -- PREPARE
-                  txn_id   :: Int
+                  txn_id   :: KVTxnId
                 , request :: KVRequest
                 }
                | KVDecision { -- COMMIT or ABORT, sent by master
-                  txn_id   :: Int                 
+                  txn_id   :: KVTxnId               
                 , decision :: KVDecision
                 , request  :: KVRequest
                 }
                | KVAck {
-                  txn_id   :: Int --final message, sent by slave
-                , ack_slave_id :: Maybe Int
+                  txn_id   :: KVTxnId --final message, sent by slave
+                , ack_id :: Maybe Int --either the slaveId (if sent FROM slave), or Nothing
                }
                | KVVote {
-                  txn_id   :: Int -- READY or ABORT, sent by slave
+                  txn_id   :: KVTxnId -- READY or ABORT, sent by slave
                 , slave_id :: Int
                 , vote     :: KVVote
                 , request  :: KVRequest

@@ -1,6 +1,8 @@
 3=3
 blah=blahblahblah
 coffee=isblack
-hello=5
+hello=16
+lowercase=UPPERCASE
 test=
 vamsi=isawesome
+xyz=zzz
