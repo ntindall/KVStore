@@ -27,6 +27,8 @@ import System.IO as IO
 type KVKey = B.ByteString
 type KVVal = B.ByteString
 
+-- TODO, with more clients, need txn_id to be (txn_id, client_id) tuples
+
 data KVRequest = GetReq {
                   reqkey :: KVKey
                 }

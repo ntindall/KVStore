@@ -20,11 +20,20 @@ import KVProtocol
 import Debug.Trace
 
 data MasterState = MasterState {
-              --add an mvar in here
-              socket :: Socket,
-              cfg :: Lib.Config,
-              voteMap :: Map.Map Int (Set.Set Int)
-            }
+                  --add an mvar in here
+                  socket :: Socket
+                , cfg :: Lib.Config
+                  --the votemap contains as a key the txn id, and has as a value
+                  --the set of slaves that have responded with a READY vote
+                , voteMap :: Map.Map Int (Set.Set Int)
+                  --the ackMap contains as a key the txn id, and has as a value
+                  --the set of slaves that have responded with an ACK
+                  --
+                  --when the last ACK is received, the master removes the txn_id
+                  --from both Maps and sends an acknowledgement to the client.
+                , ackMap  :: Map.Map Int (Set.Set Int)
+                }
+  deriving (Show)
 
 main :: IO ()
 main = do
@@ -38,7 +47,7 @@ runKVMaster cfg = do
   s <- listenOn (Lib.masterPortId cfg)
   --todo, need to fork client thread (this one, and another one for
   --handling responses from slaves)
-  _ <- runStateT processMessages (MasterState s cfg Map.empty)
+  _ <- runStateT processMessages (MasterState s cfg Map.empty Map.empty)
   return ()                     -- todo: change this to be cleaner - should just not return anything?
 
 processMessage :: KVMessage -> StateT MasterState IO ()
@@ -52,29 +61,76 @@ processMessage (KVVote txn_id slave_id VoteReady request) = do
                   (Just _) -> oldMap
       oldVotes' = Map.lookup txn_id oldMap'
       newSet = Set.insert slave_id $ fromJust oldVotes'
+      newVoteMap = Map.insert txn_id newSet oldMap'
 
   if Set.size newSet == (Prelude.length $ Lib.slaveConfig $ cfg state)
-  then liftIO $ sequence $ forwardToRing (KVDecision txn_id DecisionCommit request) (cfg state) 
+  then liftIO $ sequence $ sendMsgToRing (KVDecision txn_id DecisionCommit request) (cfg state) 
        --TODO, NEEd to remove the txn_id from the map? after everyone has acked 
   else liftIO $ sequence $ [return ()]
 
-  let state' = MasterState (socket state) (cfg state) (Map.insert txn_id newSet oldMap)
+  let state' = MasterState (socket state) (cfg state) newVoteMap (ackMap state)
 
   put state'
 
-processMessage kvMsg@(KVResponse _ _ _) = do
+processMessage kvMsg@(KVResponse txn_id slave_id _) = do
   state <- get
-  liftIO $ forwardToClient kvMsg (cfg state)
+  -- use ackMap to keep track of which transactions on the GET pathway have been
+  -- forwarded to the client
+  let oldAckMap = ackMap state
+
+  case (Map.lookup txn_id oldAckMap) of
+    Nothing -> do
+      let newAckMap = Map.insert txn_id (Set.singleton slave_id) oldAckMap
+
+      put $ MasterState (socket state) (cfg state) (voteMap state) newAckMap
+
+      liftIO $ sendMsgToClient kvMsg (cfg state)
+
+    Just hasRespondedSet  -> do
+      let hasRespondedSet' = Set.insert slave_id hasRespondedSet
+          newAckMap' = case (Set.size hasRespondedSet' == (Prelude.length $ Lib.slaveConfig $ cfg state)) of
+                        True -> --erase this txn from the ack map, all the slaves have sent a response to master
+                          Map.delete txn_id oldAckMap
+                        _    -> Map.insert txn_id hasRespondedSet' oldAckMap
+
+      put $ MasterState (socket state) (cfg state) (voteMap state) newAckMap'
+      return ()
 
 processMessage kvMsg@(KVRequest _ _) = do
   state <- get
-  _ <- liftIO $ sequence $ forwardToRing kvMsg (cfg state) -- todo: these should just not return anything
+  _ <- liftIO $ sequence $ sendMsgToRing kvMsg (cfg state) -- todo: these should just not return anything
   return ()
 
-processMessage (KVAck txn_id _) = do
+processMessage (KVAck txn_id slave_id) = do
   state <- get
-  _ <- liftIO $ forwardToClient (KVAck txn_id Nothing) (cfg state) -- todo: these should just not return anything
-  return ()
+
+  let oldAckMap = ackMap state
+      oldAcks = Map.lookup txn_id oldAckMap
+      oldAckMap' = case oldAcks of
+                  Nothing -> Map.insert txn_id Set.empty oldAckMap
+                  (Just _) -> oldAckMap
+      oldAcks' = Map.lookup txn_id oldAckMap'
+      newSet = Set.insert (fromJust slave_id) $ fromJust oldAcks'
+      newAckMap = Map.insert txn_id newSet oldAckMap'
+
+  traceShowM $ show state
+
+  if Set.size newSet == (Prelude.length $ Lib.slaveConfig $ cfg state)
+  then do --the ACK we are processing is the last ack from the ring
+    let oldVoteMap = voteMap state
+        newVoteMap = Map.delete txn_id oldVoteMap
+        newAckMap  = Map.delete txn_id oldAckMap'
+        state' = MasterState (socket state) (cfg state) newVoteMap newAckMap
+
+    put state'
+    _ <- liftIO $ sendMsgToClient (KVAck txn_id Nothing) (cfg state) -- todo: these should just not return anything
+    return ()
+
+
+  else do
+    put $ MasterState (socket state) (cfg state) (voteMap state) newAckMap
+    return () --we need to wait for more acks
+
 
 processMessage _ = undefined
 
@@ -82,24 +138,25 @@ processMessages :: StateT MasterState IO ()
 processMessages = do
   state <- get
   (h, _, _) <- liftIO $ accept $ socket state
+  --todo forkIO
   msg <- liftIO $ getMessage h
   either (\errmsg -> liftIO $ IO.putStr errmsg) processMessage msg
   liftIO $ hClose h
   processMessages
 
-forwardToRing :: KVMessage                         --request to be forwarded
+sendMsgToRing :: KVMessage                         --request to be forwarded
               -> Lib.Config                        --ring configuration
               -> [IO()]                          
-forwardToRing msg cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
+sendMsgToRing msg cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
   where forwardToNode (name, portId) = do
           slaveH <- connectTo name portId
           sendMessage slaveH msg
           hClose slaveH
 
-forwardToClient :: KVMessage
+sendMsgToClient :: KVMessage
                 -> Lib.Config
                 -> IO()
-forwardToClient msg cfg = do
+sendMsgToClient msg cfg = do
   let clientCfg = Prelude.head $ Lib.clientConfig cfg
   clientH <- connectTo (fst clientCfg) (snd clientCfg)
   sendMessage clientH msg
