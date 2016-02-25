@@ -15,6 +15,7 @@ import Data.ByteString.Lazy.Char8 as C8
 import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.Chan
+import Control.Monad.Reader
 import Control.Arrow as CA
 
 import Control.Monad
@@ -29,6 +30,13 @@ import Log as LOG
 
 type SlaveId = Int
 
+data SlaveState = SlaveState {
+                  socket :: Socket
+                 , channel :: Chan KVMessage
+                 , cfg :: Lib.Config
+                }
+  -- deriving (Show)
+
 main :: IO ()
 main = do
   success <- Lib.parseArguments
@@ -38,36 +46,42 @@ main = do
       let slaveId = fromMaybe (-1) (Lib.slaveNumber config)
       in if (slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config))
          then Lib.printUsage --error
-         else runKVSlave config slaveId
+         else do
+           mvar <- newMVar SlaveState {cfg = config}
+           runReaderT runKVSlave mvar
 
-runKVSlave :: Lib.Config -> SlaveId -> IO ()
-runKVSlave cfg slaveId = do
-    let (slaveName, slavePortId) = (Lib.slaveConfig cfg) !! slaveId
-    s <- listenOn slavePortId
+runKVSlave :: ReaderT (MVar SlaveState) IO ()
+runKVSlave = do
+   mvar <- ask
+   liftIO $ do
+     state <- readMVar mvar
+     let (slaveName, slavePortId) = (Lib.slaveConfig (cfg state)) !! (fromJust $ slaveNumber $ cfg state)
+     skt <- listenOn slavePortId
+     _ <- takeMVar mvar
+     c <- newChan
+     putMVar mvar state { socket = skt, channel = c }
+     forkIO $ runReaderT sendResponses mvar
+   return ()
+    -- channel <- newChan
+    -- forkIO $ sendResponses channel cfg -- fork a child
+    -- processMessages s channel cfg
+    -- return ()
 
-    channel <- newChan 
-    forkIO $ sendResponses channel cfg -- fork a child
-    processMessages s channel cfg
-    return ()
-
-processMessages :: Socket
-                -> Chan KVMessage
-                -> Lib.Config
-                -> IO()
-processMessages s channel cfg =
-  bracket (accept s)
-          (\(h,_,_) -> do
-            hClose h
-            processMessages s channel cfg)
-          (\(h, hostName, portNumber) -> do
-            msg <- getMessage h
-            either (\err -> IO.putStr $ (show err) ++ ['\n'])
-                   (\suc -> do
-                      IO.putStr $ (show suc) ++ ['\n'] --print the message 
-                      writeChan channel suc
-                    )
-                   msg
-          )
+-- processMessages :: ReaderT (MVar SlaveState) IO ()
+-- processMessages s channel cfg =
+--   bracket (accept s)
+--           (\(h,_,_) -> do
+--             hClose h
+--             processMessages s channel cfg)
+--           (\(h, hostName, portNumber) -> do
+--             msg <- getMessage h
+--             either (\err -> IO.putStr $ (show err) ++ ['\n'])
+--                    (\suc -> do
+--                       IO.putStr $ (show suc) ++ ['\n'] --print the message 
+--                       writeChan channel suc
+--                     )
+--                    msg
+--           )
 
 writeKVList :: [(B.ByteString, B.ByteString)] -> B.ByteString
 writeKVList kvstore = C8.intercalate (C8.pack "\n") $ Prelude.map helper kvstore
@@ -80,23 +94,22 @@ readKVList = Prelude.map parseField . C8.lines
 persistentFileName :: Int -> String                                                   --todo, hacky
 persistentFileName slaveId = "database/kvstore_" ++ (show slaveId) ++ ".txt"
 
-sendResponses :: Chan KVMessage
-              -> Lib.Config
-              -> IO()
-sendResponses channel cfg = do
-  --get a message from the channel
-  message <- readChan channel
-  --todo, logic about handling this message 
+sendResponses :: ReaderT (MVar SlaveState) IO ()
+sendResponses = do
+  mvar <- ask
+  liftIO $ do
+    state <- readMVar mvar
+    message <- readChan (channel state)
 
-  forkIO $ do
-    case message of
-      (KVResponse _ _ _) -> handleResponse 
-      (KVRequest _ _)    -> handleRequest cfg message
-      (KVVote _ _ _ _)   -> handleVote --protocol error?
-      (KVAck _ _)        -> handleAck -- protocol error?
-      (KVDecision _ _ _)   -> handleDecision cfg message
+    forkIO $ do
+      case message of
+        (KVResponse _ _ _) -> handleResponse 
+        (KVRequest _ _)    -> handleRequest (cfg state) message
+        (KVVote _ _ _ _)   -> handleVote --protocol error?
+        (KVAck _ _)        -> handleAck -- protocol error?
+        (KVDecision _ _ _)   -> handleDecision (cfg state) message
 
-  sendResponses channel cfg
+  sendResponses
 
 getMyId :: Lib.Config -> Int
 getMyId cfg = fromJust $ Lib.slaveNumber cfg
