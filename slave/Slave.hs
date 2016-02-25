@@ -16,6 +16,7 @@ import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Monad.Reader
+import Control.Monad.Catch as Catch
 import Control.Arrow as CA
 
 import Control.Monad
@@ -35,7 +36,7 @@ data SlaveState = SlaveState {
                  , channel :: Chan KVMessage
                  , cfg :: Lib.Config
                 }
-  -- deriving (Show)
+ --  deriving (Show)
 
 main :: IO ()
 main = do
@@ -52,36 +53,38 @@ main = do
 
 runKVSlave :: ReaderT (MVar SlaveState) IO ()
 runKVSlave = do
-   mvar <- ask
-   liftIO $ do
-     state <- readMVar mvar
-     let (slaveName, slavePortId) = (Lib.slaveConfig (cfg state)) !! (fromJust $ slaveNumber $ cfg state)
-     skt <- listenOn slavePortId
-     _ <- takeMVar mvar
-     c <- newChan
-     putMVar mvar state { socket = skt, channel = c }
-     forkIO $ runReaderT sendResponses mvar
-   return ()
-    -- channel <- newChan
-    -- forkIO $ sendResponses channel cfg -- fork a child
-    -- processMessages s channel cfg
-    -- return ()
+  mvar <- ask
+  c <- liftIO $ newChan
 
--- processMessages :: ReaderT (MVar SlaveState) IO ()
--- processMessages s channel cfg =
---   bracket (accept s)
---           (\(h,_,_) -> do
---             hClose h
---             processMessages s channel cfg)
---           (\(h, hostName, portNumber) -> do
---             msg <- getMessage h
---             either (\err -> IO.putStr $ (show err) ++ ['\n'])
---                    (\suc -> do
---                       IO.putStr $ (show suc) ++ ['\n'] --print the message 
---                       writeChan channel suc
---                     )
---                    msg
---           )
+  liftIO $ do
+    state <- readMVar mvar
+    let (slaveName, slavePortId) = (Lib.slaveConfig (cfg state)) !! (fromJust $ slaveNumber $ cfg state)
+    skt <- listenOn slavePortId
+    state' <- takeMVar mvar
+    putMVar mvar $ state' { socket = skt, channel = c }
+    forkIO $ runReaderT sendResponses mvar 
+  processMessages
+
+processMessages :: ReaderT (MVar SlaveState) IO ()
+processMessages = do
+  mvar <- ask
+  state <- liftIO $ readMVar mvar
+  let s = socket state
+      c = channel state
+
+  Catch.bracket (liftIO $ accept s)
+                (\(h,_,_) -> do
+                     liftIO $ hClose h
+                     processMessages)
+                   (\(h, hostName, portNumber) -> liftIO $ do
+                     msg <- getMessage h
+                     either (\err -> IO.putStr $ (show err) ++ ['\n'])
+                            (\suc -> do
+                              IO.putStr $ (show suc) ++ ['\n'] --print the message 
+                              writeChan c suc
+                            )
+                            msg
+                   )
 
 writeKVList :: [(B.ByteString, B.ByteString)] -> B.ByteString
 writeKVList kvstore = C8.intercalate (C8.pack "\n") $ Prelude.map helper kvstore
@@ -153,7 +156,6 @@ handleDecision cfg msg = do
   --WRITE TO FILE
   kvMap <- liftM readKVList $ B.readFile $ persistentFileName mySlaveId
   let updatedKvMap = Map.insert key val (Map.fromList kvMap)
-  traceIO $ show updatedKvMap
   B.writeFile (persistentFileName mySlaveId) (writeKVList $ Map.toList updatedKvMap)
   --WRITE TO LOG
 
