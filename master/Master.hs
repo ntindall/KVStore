@@ -47,8 +47,7 @@ runKVMaster cfg = do
   s <- listenOn (Lib.masterPortId cfg)
   --todo, need to fork client thread (this one, and another one for
   --handling responses from slaves)
-  _ <- runStateT processMessages (MasterState s cfg Map.empty Map.empty)
-  return ()                     -- TODO: find better way to do this
+  fst `fmap` runStateT processMessages (MasterState s cfg Map.empty Map.empty)
 
 processMessage :: KVMessage -> StateT MasterState IO ()
 processMessage (KVVote _ _ VoteAbort request) = undefined
