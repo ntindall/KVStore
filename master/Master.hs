@@ -48,7 +48,7 @@ runKVMaster cfg = do
   --todo, need to fork client thread (this one, and another one for
   --handling responses from slaves)
   _ <- runStateT processMessages (MasterState s cfg Map.empty Map.empty)
-  return ()                     -- todo: change this to be cleaner - should just not return anything?
+  return ()                     -- TODO: find better way to do this
 
 processMessage :: KVMessage -> StateT MasterState IO ()
 processMessage (KVVote _ _ VoteAbort request) = undefined
@@ -113,34 +113,20 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
   liftIO $ sendMessage clientH $ KVAck (clientId, snd txn_id) $ Just clientId
   liftIO $ hClose clientH
 
-processMessage (KVAck txn_id slave_id) = do
-  state <- get
+processMessage (KVAck txn_id (Just slave_id)) = do
+  s <- get
 
-  let oldAckMap = ackMap state
-      oldAcks = Map.lookup txn_id oldAckMap
-      oldAckMap' = case oldAcks of
-                  Nothing -> Map.insert txn_id Set.empty oldAckMap
-                  (Just _) -> oldAckMap
-      oldAcks' = Map.lookup txn_id oldAckMap'
-      newSet = Set.insert (fromJust slave_id) $ fromJust oldAcks'
-      newAckMap = Map.insert txn_id newSet oldAckMap'
+  let acks = if Map.member txn_id (ackMap s) then ackMap s else Map.insert txn_id Set.empty (ackMap s)
+      slvIds = fromJust $ Map.lookup txn_id acks
 
-  traceShowM $ show state
+  traceShowM $ show s
 
-  if Set.size newSet == (Prelude.length $ Lib.slaveConfig $ cfg state)
+  if (not $ Set.member slave_id slvIds) && Set.size slvIds == (Prelude.length $ Lib.slaveConfig $ cfg s) - 1
   then do --the ACK we are processing is the last ack from the ring
-    let oldVoteMap = voteMap state
-        newVoteMap = Map.delete txn_id oldVoteMap
-        newAckMap  = Map.delete txn_id oldAckMap'
-        state' = MasterState (socket state) (cfg state) newVoteMap newAckMap
+    put $ s { ackMap = Map.delete txn_id acks, voteMap = Map.delete txn_id $ voteMap s }
+    liftIO $ sendMsgToClient (KVAck txn_id Nothing) (cfg s) -- todo: these should just not return anything
 
-    put state'
-    liftIO $ sendMsgToClient (KVAck txn_id Nothing) (cfg state) -- todo: these should just not return anything
-
-
-  else do
-    put $ MasterState (socket state) (cfg state) (voteMap state) newAckMap
-   -- return () --we need to wait for more acks
+  else do put $ s { ackMap = Map.insert txn_id (Set.insert slave_id slvIds) acks }
 
 
 processMessage _ = undefined
