@@ -55,6 +55,7 @@ executable kvstore-client
                      , network
                      , bytestring
                      , random
+                     , mtl
                      , containers >= 0.5
   default-language:    Haskell2010
 

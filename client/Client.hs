@@ -22,11 +22,20 @@ import Network as NETWORK
 import Network.Socket as SOCKET
 import Network.BSD as BSD
 
+import Control.Monad.State
+
 -------------------------------------
 
 import KVProtocol
 
 import Debug.Trace
+
+data ClientState = ClientState {
+                    skt :: Socket
+                  , cfg :: Lib.Config
+                  , next_txn_id :: Int
+                 }
+  deriving (Show)
 
 main :: IO ()
 main = do
@@ -45,26 +54,9 @@ runKVClient cfg = do
 
   let cfg' = cfg { Lib.clientConfig = [(hostName, portId)]}
 
-  cfg'' <- registerWithMaster cfg'
-
-  (h', hostName, portNumber) <- NETWORK.accept s
-  response <- getMessage h'
-
-  either (\errmsg -> do
-            IO.putStr $ errmsg ++ ['\n']
-         )
-         (\kvMsg -> do
-            IO.putStr $ (show kvMsg) ++ ['\n']
-            case kvMsg of
-              (KVAck (clientId, txn_id) _) -> do
-                let cfg' = cfg { Lib.clientNumber = Just clientId,
-                                 Lib.clientConfig = undefined
-                               }
-                issueRequests cfg' s 0
-              _ -> undefined --todo, error handling
-         )
-         response
-
+  (a, s) <- runStateT registerWithMaster (ClientState s cfg' 0)
+  traceIO $ (show (a,s))
+  evalStateT issueRequests s
 
 getFreeSocket :: IO(Socket)
 getFreeSocket = do
@@ -80,80 +72,113 @@ getFreeSocket = do
         return sock
     )
 
-registerWithMaster :: Lib.Config -> IO()
-registerWithMaster cfg = do
-  let clientCfg = Prelude.head $ Lib.clientConfig cfg
+registerWithMaster :: StateT ClientState IO ()
+registerWithMaster = do
+  state <- get
+  let config = cfg state
+  let clientCfg = Prelude.head $ Lib.clientConfig config
       hostname = fst clientCfg
       portId = case (snd clientCfg) of
                   (PortNumber n) -> fromEnum n
-                  _ -> undefined
+                  _ -> undefined -- TODO extremely hacky
+      txn_id = next_txn_id state
 
-  h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
-  sendMessage h (KVRegistration (0,0) hostname portId) --todo check flags
+  h <- liftIO $ connectTo (Lib.masterHostName config) (Lib.masterPortId config)
+  liftIO $ sendMessage h (KVRegistration (0, txn_id) hostname portId)
 
-parseInput :: B.ByteString -> Int -> Int -> IO(Maybe KVMessage)
-parseInput text clientId txn_id = do
-  let pieces = C8.split ' ' text
-  traceIO $ show pieces 
+  waitForFirstAck -- wait for the Master to respond with the initial ack, and
+                  -- update the config to self identify with the clientId
+
+  where waitForFirstAck = do
+          state <- get
+          let txn_id = next_txn_id state
+          (h', _, _) <- liftIO $ NETWORK.accept (skt state)
+          response <- liftIO $ getMessage h'
+
+          either (\errmsg -> do
+                  liftIO $ IO.putStr $ errmsg ++ ['\n']
+                  liftIO $ IO.hClose h'
+                  waitForFirstAck
+                 )
+                 (\kvMsg -> do
+                    liftIO $ IO.putStr $ (show kvMsg) ++ ['\n']
+                    case kvMsg of
+                      (KVAck (clientId, txn_id) _) -> do
+                        let config' = (cfg state) { Lib.clientNumber = Just clientId}
+                        let state' = state { cfg = config', next_txn_id = txn_id + 1 }
+
+                        put state'
+                      _ -> do
+                        liftIO $ IO.hClose h'
+                        waitForFirstAck --todo, error handling
+                 )
+                 response
+
+parseInput :: B.ByteString -> StateT ClientState IO(Maybe KVMessage)
+parseInput text = do
+  state <- get
+  let clientId = (fromJust $ Lib.clientNumber (cfg state))
+      txn_id = next_txn_id state
+      pieces = C8.split ' ' text
   if (Prelude.length pieces > 1)
   then let reqType = pieces !! 0
            key = pieces !! 1
            val | Prelude.length pieces >= 3 = pieces !! 2
                | otherwise = B.empty
-
-
+               
            in if (reqType == "PUT" || reqType == "put")
               then return $ Just (KVRequest (clientId, txn_id) (PutReq key val))
               else return $ Just (KVRequest (clientId, txn_id) (GetReq key))
   else return Nothing
 
 
-issueRequests :: Lib.Config
-              -> Socket
-              -> Int
-              -> IO()
-issueRequests cfg s txn_id = do
+issueRequests :: StateT ClientState IO ()
+issueRequests = do
+  state <- get
+  let config = cfg state
+      txn_id = next_txn_id state
+      s = skt state
 
-  text <- IO.getLine
-  request <- parseInput (C8.pack text) (fromJust $ Lib.clientNumber cfg) txn_id
+  text <- liftIO $ IO.getLine
+  request <- parseInput (C8.pack text)
   if isNothing request
   then do
-    issueRequests cfg s txn_id
+    issueRequests
   else do
-    let request' = fromJust request
-    h <- NETWORK.connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
-    
-   -- kvReq <- makeRequest
-    traceIO (show request')
-    sendMessage h request'
+    liftIO $ (do
+      let request' = fromJust request
+      h <- NETWORK.connectTo (Lib.masterHostName config) (Lib.masterPortId config)
+      
+     -- kvReq <- makeRequest
+      traceIO $ (show request')
+      sendMessage h request'
 
-    IO.hClose h
+      IO.hClose h
 
-    (h', hostName, portNumber) <- NETWORK.accept s
-    msg <- getMessage h'
+      (h', hostName, portNumber) <- NETWORK.accept s
+      msg <- getMessage h'
 
-    case msg of 
-      Left errmsg -> do
-        IO.putStr $ errmsg ++ ['\n']
-      Right kvMsg ->
-        IO.putStr $ (show kvMsg) ++ ['\n']
-    
-    IO.hClose h'
+      either (\errmsg -> IO.putStr $ errmsg ++ ['\n'])
+             (\kvMsg -> IO.putStr $ (show kvMsg) ++ ['\n'])
+             msg
+      
+      IO.hClose h'
+      )
+    put $ state { next_txn_id = txn_id + 1 }
+    issueRequests
 
-    issueRequests cfg s (txn_id + 1)
 
+---- makeRequest :: IO (KVMessage)
+---- makeRequest = do
+----   rstr1 <- randomString
+----   rstr2 <- randomString
+----   return $ KVRequest (0,1) (PutReq rstr1 rstr2)
 
--- makeRequest :: IO (KVMessage)
--- makeRequest = do
---   rstr1 <- randomString
---   rstr2 <- randomString
---   return $ KVRequest (0,1) (PutReq rstr1 rstr2)
+--------------------------------------
+----for now
 
-------------------------------------
---for now
-
---https://stackoverflow.com/questions/17500194/generate-a-random-string-at-compile-time-or-run-time-and-use-it-in-the-rest-of-t
--- randomString :: IO B.ByteString
--- randomString = do
---   let string = Prelude.take 10 $ randomRs ('a','z') $ UNSAFEIO.unsafePerformIO newStdGen
---   return $ C8.pack string
+----https://stackoverflow.com/questions/17500194/generate-a-random-string-at-compile-time-or-run-time-and-use-it-in-the-rest-of-t
+---- randomString :: IO B.ByteString
+---- randomString = do
+----   let string = Prelude.take 10 $ randomRs ('a','z') $ UNSAFEIO.unsafePerformIO newStdGen
+----   return $ C8.pack string

@@ -3,4 +3,5 @@ packages:
 - '.'
 extra-deps: 
 - derive-2.5.22
+- stylish-haskell-0.5.14.3
 resolver: lts-3.20
