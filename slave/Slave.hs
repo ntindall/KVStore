@@ -99,69 +99,79 @@ sendResponses = do
     state <- readMVar mvar
     message <- readChan (channel state)
 
-    forkIO $ do
-      case message of
-        (KVResponse _ _ _) -> handleResponse 
-        (KVRequest _ _)    -> handleRequest (cfg state) message
-        (KVVote _ _ _ _)   -> handleVote --protocol error?
-        (KVAck _ _)        -> handleAck -- protocol error?
-        (KVDecision _ _ _)   -> handleDecision (cfg state) message
+    let handler = case message of
+                    (KVResponse _ _ _) -> handleResponse 
+                    (KVRequest _ _)    -> handleRequest message
+                    (KVVote _ _ _ _)   -> handleVote --protocol error?
+                    (KVAck _ _)        -> handleAck -- protocol error?
+                    (KVDecision _ _ _)   -> handleDecision message
+
+    forkIO $ runReaderT handler mvar
 
   sendResponses
 
 getMyId :: Lib.Config -> Int
 getMyId cfg = fromJust $ Lib.slaveNumber cfg
 
-handleRequest :: Lib.Config -> KVMessage -> IO()
-handleRequest cfg msg = do
-  h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
-  let field_txn  = txn_id msg
-      field_request = request msg
-      mySlaveId = getMyId cfg
+handleRequest :: KVMessage -> ReaderT (MVar SlaveState) IO ()
+handleRequest msg = do
+  mvar <- ask
+  liftIO $ do
+    state <- readMVar mvar
+    let config = cfg state
 
-  case field_request of
-      PutReq key val -> do
-        -- LOG READY, <timestamp, txn_id, key, newval>
+    h <- connectTo (Lib.masterHostName config) (Lib.masterPortId config)
+    let field_txn  = txn_id msg
+        field_request = request msg
+        mySlaveId = getMyId config
 
-        -- LOCK!!!@!@! !@ ! ! 
-        LOG.writeReady (LOG.persistentLogName mySlaveId) msg
-        -- UNLOCK
+    case field_request of
+        PutReq key val -> do
+          -- LOG READY, <timestamp, txn_id, key, newval>
 
-        sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
-        --vote abort if invalid key value
-      GetReq key     -> do
-        kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
-        case (Map.lookup key $ Map.fromList kvMap) of
-          Nothing -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
-          Just val -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
+          -- LOCK!!!@!@! !@ ! ! 
+          LOG.writeReady (LOG.persistentLogName mySlaveId) msg
+          -- UNLOCK
 
-  IO.hClose h
+          sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
+          --vote abort if invalid key value
+        GetReq key     -> do
+          kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
+          case (Map.lookup key $ Map.fromList kvMap) of
+            Nothing -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
+            Just val -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
+
+    IO.hClose h
   
-handleDecision :: Lib.Config -> KVMessage -> IO()
-handleDecision cfg msg = do
-  let field_txn  = txn_id msg
-      field_request = request msg
-      mySlaveId = getMyId cfg
-      (key,val) = case field_request of
-                    (PutReq k v) -> (k,v)
-                    (GetReq _) -> undefined -- protocol error
+handleDecision :: KVMessage -> ReaderT (MVar SlaveState) IO ()
+handleDecision msg = do
+  mvar <- ask
+  liftIO $ do
+    state <- readMVar mvar
+    let config = cfg state
+        field_txn  = txn_id msg
+        field_request = request msg
+        mySlaveId = getMyId config
+        (key,val) = case field_request of
+                      (PutReq k v) -> (k,v)
+                      (GetReq _) -> undefined -- protocol error
 
-  --DEAL WITH ABORT
-  --USE BRACKET TO MAKE THIS ATOMIC
-  --WRITE TO FILE
-  kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
-  let updatedKvMap = Map.insert key val (Map.fromList kvMap)
+    --DEAL WITH ABORT
+    --USE BRACKET TO MAKE THIS ATOMIC
+    --WRITE TO FILE
+    kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
+    let updatedKvMap = Map.insert key val (Map.fromList kvMap)
 
-  traceIO $ show updatedKvMap
-  B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList updatedKvMap)
-  --WRITE TO LOG
+    traceIO $ show updatedKvMap
+    B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList updatedKvMap)
+    --WRITE TO LOG
 
-  LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
-  --TODO!!! ! ! ! 
+    LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
+    --TODO!!! ! ! ! 
 
-  h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
-  sendMessage h (KVAck field_txn (Just mySlaveId))
-  IO.hClose h
+    h <- connectTo (Lib.masterHostName config) (Lib.masterPortId config)
+    sendMessage h (KVAck field_txn (Just mySlaveId))
+    IO.hClose h
 
 handleResponse = undefined
 handleVote = undefined
