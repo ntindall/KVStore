@@ -1,8 +1,16 @@
 3=3
+aKey=1
+aNewKey=anotherValue
+adele=iscool
 blah=blahblahblah
 coffee=isblack
+firstPUT=aNewValue
 hello=test
+key\=space
 lowercase=UPPERCASE
+secondPUT=A
 test=1
+testtest_test=
+val1=val3
 vamsi=isawesome
 xyz=zzz
