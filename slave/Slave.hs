@@ -16,6 +16,8 @@ import Data.ByteString.Lazy.Char8 as C8
 import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.Chan
+import Control.Monad.Reader
+import Control.Monad.Catch as Catch
 import Control.Arrow as CA
 
 import Control.Monad
@@ -31,6 +33,13 @@ import qualified Utils
 
 type SlaveId = Int
 
+data SlaveState = SlaveState {
+                  socket :: Socket
+                 , channel :: Chan KVMessage
+                 , cfg :: Lib.Config
+                }
+ --  deriving (Show)
+
 main :: IO ()
 main = do
   success <- Lib.parseArguments
@@ -40,74 +49,65 @@ main = do
       let slaveId = fromMaybe (-1) (Lib.slaveNumber config)
       in if (slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config))
          then Lib.printUsage --error
-         else runKVSlave config slaveId
+         else do
+           mvar <- newMVar SlaveState {cfg = config}
+           runReaderT runKVSlave mvar
 
-runKVSlave :: Lib.Config -> SlaveId -> IO ()
-runKVSlave cfg slaveId = do
-    let (slaveName, slavePortId) = (Lib.slaveConfig cfg) !! slaveId
-    s <- listenOn slavePortId
+runKVSlave :: ReaderT (MVar SlaveState) IO ()
+runKVSlave = do
+  mvar <- ask
+  c <- liftIO $ newChan
 
-    fileExists <- DIR.doesFileExist (LOG.persistentLogName slaveId)
-    if fileExists
-    then do
-      unsentAcks <- LOG.handleUnfinishedTxn (LOG.persistentLogName slaveId) (persistentFileName slaveId)
+  liftIO $ do
+    state <- readMVar mvar
+    let (slaveName, slavePortId) = (Lib.slaveConfig (cfg state)) !! (fromJust $ slaveNumber $ cfg state)
+    skt <- listenOn slavePortId
+    state' <- takeMVar mvar
+    putMVar mvar $ state' { socket = skt, channel = c }
+    forkIO $ runReaderT sendResponses mvar 
+  processMessages
 
-      sequence_ $ map (\txn_id -> do
-                        h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
-                        sendMessage h (KVAck txn_id (Just slaveId))
-                      )
-                      unsentAcks
-    else do
-      _ <- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
-      return ()
+processMessages :: ReaderT (MVar SlaveState) IO ()
+processMessages = do
+  mvar <- ask
+  state <- liftIO $ readMVar mvar
+  let s = socket state
+      c = channel state
 
-
-
-    channel <- newChan 
-    forkIO $ sendResponses channel cfg -- fork a child
-    processMessages s channel cfg
-    return ()
-
-processMessages :: Socket
-                -> Chan KVMessage
-                -> Lib.Config
-                -> IO()
-processMessages s channel cfg =
-  bracket (accept s)
-          (\(h,_,_) -> do
-            hClose h
-            processMessages s channel cfg)
-          (\(h, hostName, portNumber) -> do
-            msg <- getMessage h
-            either (\err -> IO.putStr $ (show err) ++ ['\n'])
-                   (\suc -> do
-                      IO.putStr $ (show suc) ++ ['\n'] --print the message 
-                      writeChan channel suc
-                    )
-                   msg
-          )
+  Catch.bracket (liftIO $ accept s)
+                (\(h,_,_) -> do
+                     liftIO $ hClose h
+                     processMessages)
+                   (\(h, hostName, portNumber) -> liftIO $ do
+                     msg <- getMessage h
+                     either (\err -> IO.putStr $ (show err) ++ ['\n'])
+                            (\suc -> do
+                              IO.putStr $ (show suc) ++ ['\n'] --print the message 
+                              writeChan c suc
+                            )
+                            msg
+                   )
 
 
 persistentFileName :: Int -> String                                                   --todo, hacky
 persistentFileName slaveId = "database/kvstore_" ++ (show slaveId) ++ ".txt"
 
-sendResponses :: Chan KVMessage
-              -> Lib.Config
-              -> IO()
-sendResponses channel cfg = do
-  --get a message from the channel
-  message <- readChan channel
-  --todo, logic about handling this message 
+sendResponses :: ReaderT (MVar SlaveState) IO ()
+sendResponses = do
+  mvar <- ask
+  liftIO $ do
+    state <- readMVar mvar
+    message <- readChan (channel state)
 
-  forkIO $ do
-    case message of
-      (KVResponse _ _ _) -> handleResponse 
-      (KVRequest _ _)    -> handleRequest cfg message
-      (KVVote _ _ _ _)   -> handleVote --protocol error?
-      (KVAck _ _)        -> handleAck -- protocol error?
-      (KVDecision _ _ _)   -> handleDecision cfg message
+    forkIO $ do
+      case message of
+        (KVResponse _ _ _) -> handleResponse 
+        (KVRequest _ _)    -> handleRequest (cfg state) message
+        (KVVote _ _ _ _)   -> handleVote --protocol error?
+        (KVAck _ _)        -> handleAck -- protocol error?
+        (KVDecision _ _ _)   -> handleDecision (cfg state) message
 
-  sendResponses channel cfg
+  sendResponses
 
 getMyId :: Lib.Config -> Int
 getMyId cfg = fromJust $ Lib.slaveNumber cfg
@@ -149,8 +149,9 @@ handleDecision cfg msg = do
   --DEAL WITH ABORT
   --USE BRACKET TO MAKE THIS ATOMIC
   --WRITE TO FILE
-  kvMap <- liftM readKVList $ B.readFile $ persistentFileName mySlaveId
+  kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
   let updatedKvMap = Map.insert key val (Map.fromList kvMap)
+
   traceIO $ show updatedKvMap
   B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList updatedKvMap)
   --WRITE TO LOG
