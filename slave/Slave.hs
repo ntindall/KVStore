@@ -22,6 +22,7 @@ import Control.Monad
 import Debug.Trace
 
 import KVProtocol
+import Log as LOG
 
 --- todo, touch file when slave registers
 -- todo, slave registration
@@ -87,12 +88,13 @@ sendResponses channel cfg = do
   message <- readChan channel
   --todo, logic about handling this message 
 
-  case message of
-    (KVResponse _ _ _) -> handleResponse 
-    (KVRequest _ _)    -> handleRequest cfg message
-    (KVVote _ _ _ _)   -> handleVote --protocol error?
-    (KVAck _ _)        -> handleAck -- protocol error?
-    (KVDecision _ _ _)   -> handleDecision cfg message
+  forkIO $ do
+    case message of
+      (KVResponse _ _ _) -> handleResponse 
+      (KVRequest _ _)    -> handleRequest cfg message
+      (KVVote _ _ _ _)   -> handleVote --protocol error?
+      (KVAck _ _)        -> handleAck -- protocol error?
+      (KVDecision _ _ _)   -> handleDecision cfg message
 
   sendResponses channel cfg
 
@@ -109,6 +111,11 @@ handleRequest cfg msg = do
   case field_request of
       PutReq key val -> do
         -- LOG READY, <timestamp, txn_id, key, newval>
+
+        -- LOCK!!!@!@! !@ ! ! 
+        LOG.writeReady (LOG.persistentLogName mySlaveId) msg
+        -- UNLOCK
+
         sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
         --vote abort if invalid key value
       GetReq key     -> do
@@ -136,6 +143,8 @@ handleDecision cfg msg = do
   traceIO $ show updatedKvMap
   B.writeFile (persistentFileName mySlaveId) (writeKVList $ Map.toList updatedKvMap)
   --WRITE TO LOG
+
+  LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
   --TODO!!! ! ! ! 
 
   h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
