@@ -1,6 +1,5 @@
 module Lib
-    ( someFunc
-    , printUsage
+    ( printUsage
     , options
     , parseArguments
     , Mode
@@ -28,9 +27,6 @@ data Config = Config { masterHostName :: HostName
                      , clientNumber   :: Maybe Int
                      }
         deriving (Show)
-
-someFunc :: IO ()
-someFunc = putStrLn "someFunc"
 
 options :: [ OptDescr Mode ]
 options = [ Option ['l'] ["local"] (NoArg Local) "local mode"

@@ -4,6 +4,7 @@ module Main where
 
 import Lib
 import System.IO as IO
+import System.Directory as DIR
 import Network
 import Data.Maybe
 import Data.List as List
@@ -23,6 +24,7 @@ import Debug.Trace
 
 import KVProtocol
 import Log as LOG
+import qualified Utils
 
 --- todo, touch file when slave registers
 -- todo, slave registration
@@ -44,6 +46,22 @@ runKVSlave :: Lib.Config -> SlaveId -> IO ()
 runKVSlave cfg slaveId = do
     let (slaveName, slavePortId) = (Lib.slaveConfig cfg) !! slaveId
     s <- listenOn slavePortId
+
+    fileExists <- DIR.doesFileExist (LOG.persistentLogName slaveId)
+    if fileExists
+    then do
+      unsentAcks <- LOG.handleUnfinishedTxn (LOG.persistentLogName slaveId) (persistentFileName slaveId)
+
+      sequence_ $ map (\txn_id -> do
+                        h <- connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
+                        sendMessage h (KVAck txn_id (Just slaveId))
+                      )
+                      unsentAcks
+    else do
+      _ <- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
+      return ()
+
+
 
     channel <- newChan 
     forkIO $ sendResponses channel cfg -- fork a child
@@ -69,13 +87,6 @@ processMessages s channel cfg =
                    msg
           )
 
-writeKVList :: [(B.ByteString, B.ByteString)] -> B.ByteString
-writeKVList kvstore = C8.intercalate (C8.pack "\n") $ Prelude.map helper kvstore
-  where helper (k,v) = C8.concat [k, (C8.pack "="), v]
-
-readKVList :: B.ByteString -> [(B.ByteString, B.ByteString)]
-readKVList = Prelude.map parseField . C8.lines
-  where parseField = second (C8.drop 1) . C8.break (== '=')
 
 persistentFileName :: Int -> String                                                   --todo, hacky
 persistentFileName slaveId = "database/kvstore_" ++ (show slaveId) ++ ".txt"
@@ -119,7 +130,7 @@ handleRequest cfg msg = do
         sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
         --vote abort if invalid key value
       GetReq key     -> do
-        kvMap <- liftM readKVList $ B.readFile $ persistentFileName mySlaveId
+        kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
         case (Map.lookup key $ Map.fromList kvMap) of
           Nothing -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
           Just val -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
@@ -141,7 +152,7 @@ handleDecision cfg msg = do
   kvMap <- liftM readKVList $ B.readFile $ persistentFileName mySlaveId
   let updatedKvMap = Map.insert key val (Map.fromList kvMap)
   traceIO $ show updatedKvMap
-  B.writeFile (persistentFileName mySlaveId) (writeKVList $ Map.toList updatedKvMap)
+  B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList updatedKvMap)
   --WRITE TO LOG
 
   LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
