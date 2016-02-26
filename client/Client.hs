@@ -2,7 +2,7 @@
 
 module Main where
 
-import qualified Lib as Lib
+import qualified Lib
 
 
 import Control.Monad
@@ -58,15 +58,15 @@ runKVClient cfg = do
   let cfg' = cfg { Lib.clientConfig = [(hostName, portId)]}
 
   (a, s) <- runStateT registerWithMaster (ClientState s cfg' 0)
-  traceIO $ (show (a,s))
+  traceIO $ show (a,s)
   evalStateT issueRequests s
 
-getFreeSocket :: IO(Socket)
+getFreeSocket :: IO Socket
 getFreeSocket = do
   proto <- BSD.getProtocolNumber "tcp"
   bracketOnError
     (SOCKET.socket AF_INET Stream proto)
-    (SOCKET.sClose)
+    SOCKET.sClose
     (\sock -> do
         let port = aNY_PORT
         SOCKET.setSocketOption sock ReuseAddr 1
@@ -81,7 +81,7 @@ registerWithMaster = do
   let config = cfg state
   let clientCfg = Prelude.head $ Lib.clientConfig config
       hostname = fst clientCfg
-      portId = case (snd clientCfg) of
+      portId = case snd clientCfg of
                   (PortNumber n) -> fromEnum n
                   _ -> undefined -- TODO extremely hacky
       txn_id = next_txn_id state
@@ -99,12 +99,12 @@ registerWithMaster = do
           response <- liftIO $ KVProtocol.getMessage h'
 
           either (\errmsg -> do
-                  liftIO $ IO.putStr $ errmsg ++ ['\n']
+                  liftIO $ IO.putStr $ errmsg ++ "\n"
                   liftIO $ IO.hClose h'
                   waitForFirstAck
                  )
                  (\kvMsg -> do
-                    liftIO $ IO.putStr $ (show kvMsg) ++ ['\n']
+                    liftIO $ IO.putStr $ show kvMsg ++ "\n"
                     case kvMsg of
                       (KVAck (clientId, txn_id) _) -> do
                         let config' = (cfg state) { Lib.clientNumber = Just clientId}
@@ -120,16 +120,16 @@ registerWithMaster = do
 parseInput :: B.ByteString -> StateT ClientState IO(Maybe KVMessage)
 parseInput text = do
   state <- get
-  let clientId = (fromJust $ Lib.clientNumber (cfg state))
+  let clientId = fromJust $ Lib.clientNumber (cfg state)
       txn_id = next_txn_id state
       pieces = C8.split ' ' text
-  if (Prelude.length pieces > 1)
-  then let reqType = pieces !! 0
+  if Prelude.length pieces > 1
+  then let reqType = Prelude.head pieces
            key = pieces !! 1
            val | Prelude.length pieces >= 3 = pieces !! 2
                | otherwise = B.empty
-               
-           in if (reqType == "PUT" || reqType == "put")
+
+           in if reqType == "PUT" || reqType == "put"
               then return $ Just (KVRequest (clientId, txn_id) (PutReq key val))
               else return $ Just (KVRequest (clientId, txn_id) (GetReq key))
   else return Nothing
@@ -142,18 +142,17 @@ issueRequests = do
       txn_id = next_txn_id state
       s = skt state
 
-  text <- liftIO $ IO.getLine
+  text <- liftIO IO.getLine
   request <- parseInput (C8.pack text)
   if isNothing request
-  then do
-    issueRequests
+  then issueRequests
   else do
-    liftIO $ (do
+    liftIO (do
       let request' = fromJust request
       h <- KVProtocol.connectToMaster config
-      
+
      -- kvReq <- makeRequest
-      traceIO $ (show request')
+      traceIO (show request')
       KVProtocol.sendMessage h request'
 
       IO.hClose h
@@ -161,10 +160,10 @@ issueRequests = do
       (h', hostName, portNumber) <- NETWORK.accept s
       msg <- KVProtocol.getMessage h'
 
-      either (\errmsg -> IO.putStr $ errmsg ++ ['\n'])
-             (\kvMsg -> IO.putStr $ (show kvMsg) ++ ['\n'])
+      either (\errmsg -> IO.putStr $ errmsg ++ "\n")
+             (\kvMsg -> IO.putStr $ show kvMsg ++ "\n")
              msg
-      
+
       IO.hClose h'
       )
     put $ state { next_txn_id = txn_id + 1 }

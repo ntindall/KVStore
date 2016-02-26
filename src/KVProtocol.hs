@@ -73,7 +73,7 @@ data KVMessage = KVRegistration {
                 , request :: KVRequest
                 }
                | KVDecision { -- COMMIT or ABORT, sent by master
-                  txn_id   :: KVTxnId               
+                  txn_id   :: KVTxnId
                 , decision :: KVDecision
                 , request  :: KVRequest
                 }
@@ -101,20 +101,20 @@ instance Serialize KVVote
 
 
 decodeMsg :: B.ByteString -> Either String KVMessage
-decodeMsg b = CEREAL.decodeLazy b
+decodeMsg = CEREAL.decodeLazy
 
 getMessage :: Handle -> IO(Either String KVMessage)
 getMessage h = do
   bytes <- C8.hGetContents h
-  case (C8.null bytes) of
-    True -> return $ Left "Handle is empty"
-    False -> return $ decodeMsg (fromStrict bytes) 
+  if C8.null bytes
+  then return $ Left "Handle is empty"
+  else return $ decodeMsg (fromStrict bytes)
 
 sendMessage :: Handle -> KVMessage -> IO ()
 sendMessage h msg = do
   traceIO $ "sending " ++ show msg
   C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy msg)
 
-connectToMaster :: Lib.Config -> IO(Handle)
+connectToMaster :: Lib.Config -> IO Handle
 connectToMaster cfg = connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
 

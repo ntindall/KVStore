@@ -32,27 +32,23 @@ options :: [ OptDescr Mode ]
 options = [ Option ['l'] ["local"] (NoArg Local) "local mode"
           , Option ['n'] ["size"]  (ReqArg (\s -> RingSize (read s :: Int)) "Int") "ring size"
           , Option ['i'] ["id"]    (ReqArg (\s -> SlaveNum (read s :: Int)) "Int") "slaveId"
-          ] 
+          ]
 
 printUsage :: IO ()
-printUsage = do
-  putStr $ usageInfo "KVStore" options
-
+printUsage = putStr $ usageInfo "KVStore" options
 
 parseArguments :: IO (Maybe Config)
 parseArguments = do
   args <- getArgs
   let (options, nonOpts, errors) = getOpt RequireOrder Lib.options args
-  if not (null errors) 
+  if not (null errors) || null options
   then return Nothing
-  else 
-    if (null options) then return Nothing -- error
-    else 
+  else
       let (isLocal, n, slaveN) = parseOptions options
           slaveCfg = allocSlaves isLocal n
-      in case (isLocal) of
+      in case isLocal of
         True -> return $ Just Config { masterHostName = "localHost"
-                                     , masterPortId   = (PortNumber 1063)
+                                     , masterPortId   = PortNumber 1063
                                      , clientConfig   = [] --TODO ALLOW DYNAMIC REGISTRATION OF CLIENTS
                                      , slaveConfig    = slaveCfg
                                      , slaveNumber = slaveN
@@ -64,11 +60,11 @@ parseArguments = do
 parseOptions :: [Mode]                        --options parsed from command line
              -> (Bool, Int, Maybe Int)        --(isLocal, ringSize, slaveId)
 parseOptions l = optionsAcc l (False, 1, Nothing)
-  where optionsAcc l' acc 
+  where optionsAcc l' acc
           | null l' = acc
           | otherwise =
-            let opt = (head l')
-            in case opt of 
+            let opt = head l'
+            in case opt of
               Local      -> optionsAcc (tail l') (True, snd' acc, thrd acc)
               RingSize n -> optionsAcc (tail l') (fst' acc, n, thrd acc)
               SlaveNum s -> optionsAcc (tail l') (fst' acc, snd' acc, Just s)

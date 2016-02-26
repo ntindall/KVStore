@@ -19,18 +19,17 @@ import Data.Set as Set
 import Debug.Trace
 
 import Control.Monad
-import KVProtocol
 
 --https://stackoverflow.com/questions/17909770/get-time-as-int
-currentTimeInt :: IO (Int)
-currentTimeInt = round `fmap` getPOSIXTime :: IO(Int)
+currentTimeInt :: IO Int
+currentTimeInt = round `fmap` getPOSIXTime :: IO Int
 
 
 getSeparator :: Char
 getSeparator = ' ' --todo, escaping?
 
 writeReady :: FilePath -> KVMessage -> IO()
-writeReady filename msg = do 
+writeReady filename msg = do
   -- LOG READY, <timestamp, txn_id, key, newval>
   time <- currentTimeInt
   let field_txn = txn_id msg
@@ -38,9 +37,9 @@ writeReady filename msg = do
       key = putkey field_request
       val = putval field_request
       sep = getSeparator
-      logEntry = (List.intercalate [sep] $ ["READY", (show field_txn), (show key), (show val), (show time) ]) ++ ['\n']
+      logEntry = List.intercalate [sep] ["READY", show field_txn, show key, show val, show time] ++ "\n"
 
-  traceIO $ logEntry
+  traceIO logEntry
   appendFile filename logEntry
 
 
@@ -50,35 +49,29 @@ writeCommit filename msg = do
   time <- currentTimeInt
   let field_txn = txn_id msg
       sep = getSeparator
-      logEntry = (List.intercalate [sep] $ ["COMMIT", (show field_txn), (show time)]) ++ ['\n']
+      logEntry = List.intercalate [sep] ["COMMIT", show field_txn, show time] ++ "\n"
 
   appendFile filename logEntry
 
-handleUnfinishedTxn :: FilePath -> FilePath -> IO([(Int,Int)])
+handleUnfinishedTxn :: FilePath -> FilePath -> IO [(Int,Int)]
 handleUnfinishedTxn logPath storePath = do
-  traceIO $ "attempting to rebuild"
-  
+  traceIO "attempting to rebuild"
+
   file <- B.readFile logPath
   let lines = reverse $ C8.split '\n' file
       txnSet = Set.empty
       unfinishedReqs = handleLines lines txnSet []
-      reqTxnIdKVTuples = List.map (\line -> 
+      reqTxnIdKVTuples = List.map (\line ->
                         let pieces = C8.split ' ' line
                         in (pieces !! 1, pieces !! 2, pieces !! 3))
                         unfinishedReqs
 
-  txnIds <- sequence $ Prelude.map (\(id, k, v) -> do
-                        updateKVStore storePath k v
-                        let txn_id = read (C8.unpack id) :: (Int, Int)
-                        writeCommit logPath $ KVRequest txn_id (PutReq k v)
-
-                        return txn_id
-
-
-
-                      ) reqTxnIdKVTuples
-
-  return txnIds
+  mapM (\(id, k, v) -> do
+          updateKVStore storePath k v
+          let txn_id = read (C8.unpack id) :: (Int, Int)
+          writeCommit logPath $ KVRequest txn_id (PutReq k v)
+          return txn_id
+       ) reqTxnIdKVTuples
 
 
 --TODO quickcheck
@@ -86,14 +79,14 @@ handleLines :: [B.ByteString] -> Set.Set B.ByteString -> [B.ByteString] -> [B.By
 handleLines [] commitAcc readyAcc = readyAcc
 handleLines (x:xs) commitAcc readyAcc =
   let pieces = C8.split ' ' x
-      action = (pieces !! 0)
+      action = head pieces
       txn_id = (pieces !! 1)
-  in 
+  in
     if action == "COMMIT"
     then
       let commitAcc' = Set.insert txn_id commitAcc
       in handleLines xs commitAcc' readyAcc
-    else 
+    else
       if Set.member txn_id commitAcc
       then handleLines xs commitAcc readyAcc
       else handleLines xs commitAcc (readyAcc ++ [x])
@@ -101,11 +94,11 @@ handleLines (x:xs) commitAcc readyAcc =
 
 --todo, auto touch files if they are not there
 persistentLogName :: Int -> String                                                   --todo, hacky
-persistentLogName slaveId = "database/logs/log_kvstore_" ++ (show slaveId) ++ ".txt"
+persistentLogName slaveId = "database/logs/log_kvstore_" ++ show slaveId ++ ".txt"
 
 updateKVStore :: FilePath -> B.ByteString -> B.ByteString -> IO ()
 updateKVStore filePath key val = do
-  kvMap <- liftM Utils.readKVList $ B.readFile $ filePath
+  kvMap <- liftM Utils.readKVList $ B.readFile filePath
   let updatedKvMap = Map.insert key val (Map.fromList kvMap)
   traceIO $ show updatedKvMap
   B.writeFile filePath (Utils.writeKVList $ Map.toList updatedKvMap)

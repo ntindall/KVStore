@@ -47,9 +47,9 @@ main = do
   success <- Lib.parseArguments
   case success of
     Nothing     -> Lib.printUsage --an error occured
-    Just config -> 
+    Just config ->
       let slaveId = fromJust (Lib.slaveNumber config)
-      in if (slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config))
+      in if slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config)
          then Lib.printUsage --error
          else do
            mvar <- newMVar SlaveState {cfg = config}
@@ -58,13 +58,13 @@ main = do
 runKVSlave :: ReaderT (MVar SlaveState) IO ()
 runKVSlave = do
   mvar <- ask
-  c <- liftIO $ newChan
+  c <- liftIO newChan
 
   liftIO $ do
     state <- readMVar mvar
     let config = cfg state
         slaveId = fromJust $ Lib.slaveNumber config
-        (slaveName, slavePortId) = (Lib.slaveConfig config) !! slaveId
+        (slaveName, slavePortId) = Lib.slaveConfig config !! slaveId
     skt <- listenOn slavePortId
 
     fileExists <- DIR.doesFileExist (LOG.persistentLogName slaveId)
@@ -72,12 +72,11 @@ runKVSlave = do
     then do
       unsentAcks <- LOG.handleUnfinishedTxn (LOG.persistentLogName slaveId) (persistentFileName slaveId)
 
-      sequence_ $ List.map (\txn_id -> do
-                              h <- KVProtocol.connectToMaster (cfg state)
-                              KVProtocol.sendMessage h (KVAck txn_id (Just slaveId))
-                              IO.hClose h
-                            )
-                            unsentAcks
+      mapM_ (\txn_id -> do
+              h <- KVProtocol.connectToMaster (cfg state)
+              KVProtocol.sendMessage h (KVAck txn_id (Just slaveId))
+              IO.hClose h
+            ) unsentAcks
     else do
       _ <- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
       return ()
@@ -100,17 +99,17 @@ processMessages = do
                      processMessages)
                    (\(h, hostName, portNumber) -> liftIO $ do
                      msg <- KVProtocol.getMessage h
-                     either (\err -> IO.putStr $ (show err) ++ ['\n'])
+                     either (\err -> IO.putStr $ show err ++ "\n")
                             (\suc -> do
-                              IO.putStr $ (show suc) ++ ['\n'] --print the message 
+                              IO.putStr $ show suc ++ "\n" --print the message
                               writeChan c suc
                             )
                             msg
                    )
 
 
-persistentFileName :: Int -> String                                                   --todo, hacky
-persistentFileName slaveId = "database/kvstore_" ++ (show slaveId) ++ ".txt"
+persistentFileName :: Int -> String  --todo, hacky
+persistentFileName slaveId = "database/kvstore_" ++ show slaveId ++ ".txt"
 
 sendResponses :: ReaderT (MVar SlaveState) IO ()
 sendResponses = do
@@ -120,11 +119,11 @@ sendResponses = do
     message <- readChan (channel state)
 
     let handler = case message of
-                    (KVResponse _ _ _) -> handleResponse 
-                    (KVRequest _ _)    -> handleRequest message
-                    (KVVote _ _ _ _)   -> handleVote --protocol error?
-                    (KVAck _ _)        -> handleAck -- protocol error?
-                    (KVDecision _ _ _)   -> handleDecision message
+                    KVResponse{} -> handleResponse
+                    KVRequest{}  -> handleRequest message
+                    KVVote{}     -> handleVote --protocol error?
+                    KVAck{}      -> handleAck -- protocol error?
+                    KVDecision{} -> handleDecision message
 
     forkIO $ runReaderT handler mvar
 
@@ -149,7 +148,7 @@ handleRequest msg = do
         PutReq key val -> do
           -- LOG READY, <timestamp, txn_id, key, newval>
 
-          -- LOCK!!!@!@! !@ ! ! 
+          -- LOCK!!!@!@! !@ ! !
           LOG.writeReady (LOG.persistentLogName mySlaveId) msg
           -- UNLOCK
 
@@ -157,12 +156,12 @@ handleRequest msg = do
           --vote abort if invalid key value
         GetReq key     -> do
           kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
-          case (Map.lookup key $ Map.fromList kvMap) of
+          case Map.lookup key $ Map.fromList kvMap of
             Nothing -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
             Just val -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
 
     IO.hClose h
-  
+
 handleDecision :: KVMessage -> ReaderT (MVar SlaveState) IO ()
 handleDecision msg = do
   mvar <- ask

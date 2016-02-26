@@ -2,7 +2,9 @@
 
 A distributed key-value store. CS240H Final Project.
 
-[Vamsi Chitters](mailto:vamsikc@stanford.edu), [Colin Man](mailto:colinman.stanford.edu), [Nathan James Tindall](mailto:ntindall@stanford.edu) 
+[Vamsi Chitters](mailto:vamsikc@stanford.edu),
+[Colin Man](mailto:colinman.stanford.edu),
+[Nathan James Tindall](mailto:ntindall@stanford.edu)
 
 # Usage
 
