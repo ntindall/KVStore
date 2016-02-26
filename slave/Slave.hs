@@ -39,6 +39,7 @@ data SlaveState = SlaveState {
                   socket :: Socket
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
+                , store :: Map.Map B.ByteString B.ByteString
                 }
  --  deriving (Show)
 
@@ -52,7 +53,7 @@ main = do
       in if slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config)
          then Lib.printUsage --error
          else do
-           mvar <- newMVar SlaveState {cfg = config}
+           mvar <- newMVar SlaveState {cfg = config, store = Map.empty }
            runReaderT runKVSlave mvar
 
 runKVSlave :: ReaderT (MVar SlaveState) IO ()
@@ -83,8 +84,26 @@ runKVSlave = do
 
     state' <- takeMVar mvar
     putMVar mvar $ state' { socket = skt, channel = c }
-    forkIO $ runReaderT sendResponses mvar 
+    forkIO $ runReaderT sendResponses mvar
+    forkIO $ runReaderT checkpoint mvar
+
   processMessages
+
+checkpoint :: ReaderT (MVar SlaveState) IO ()
+checkpoint = do 
+  mvar <- ask
+  liftIO $ do
+    state <- readMVar mvar
+    let config = cfg state
+        mySlaveId = fromJust (Lib.slaveNumber config)
+
+    stateAtomic <- takeMVar mvar
+    B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store stateAtomic))
+    putMVar mvar stateAtomic
+
+  -- sleep for 2 seconds
+  liftIO $ threadDelay 2000000
+  checkpoint
 
 processMessages :: ReaderT (MVar SlaveState) IO ()
 processMessages = do
@@ -155,8 +174,7 @@ handleRequest msg = do
           KVProtocol.sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
           --vote abort if invalid key value
         GetReq key     -> do
-          kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
-          case Map.lookup key $ Map.fromList kvMap of
+          case Map.lookup key (store state)  of
             Nothing -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
             Just val -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
 
@@ -178,11 +196,15 @@ handleDecision msg = do
     --DEAL WITH ABORT
     --USE BRACKET TO MAKE THIS ATOMIC
     --WRITE TO FILE
-    kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
-    let updatedKvMap = Map.insert key val (Map.fromList kvMap)
+    state' <- takeMVar mvar
+    let updatedStore = Map.insert key val (store state')
+    putMVar mvar $ state' {store = updatedStore}
 
-    traceIO $ show updatedKvMap
-    B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList updatedKvMap)
+    --liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
+    --let updatedKvMap = Map.insert key val (Map.fromList kvMap)
+
+    --traceIO $ show updatedKvMap
+    --B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList updatedKvMap)
     --WRITE TO LOG
 
     LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
