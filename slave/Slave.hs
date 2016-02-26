@@ -37,8 +37,8 @@ type SlaveId = Int
 
 data SlaveState = SlaveState {
                   socket :: Socket
-                 , channel :: Chan KVMessage
-                 , cfg :: Lib.Config
+                , channel :: Chan KVMessage
+                , cfg :: Lib.Config
                 }
  --  deriving (Show)
 
@@ -48,7 +48,7 @@ main = do
   case success of
     Nothing     -> Lib.printUsage --an error occured
     Just config -> 
-      let slaveId = fromMaybe (-1) (Lib.slaveNumber config)
+      let slaveId = fromJust (Lib.slaveNumber config)
       in if (slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config))
          then Lib.printUsage --error
          else do
@@ -62,8 +62,26 @@ runKVSlave = do
 
   liftIO $ do
     state <- readMVar mvar
-    let (slaveName, slavePortId) = (Lib.slaveConfig (cfg state)) !! (fromJust $ slaveNumber $ cfg state)
+    let config = cfg state
+        slaveId = fromJust $ Lib.slaveNumber config
+        (slaveName, slavePortId) = (Lib.slaveConfig config) !! slaveId
     skt <- listenOn slavePortId
+
+    fileExists <- DIR.doesFileExist (LOG.persistentLogName slaveId)
+    if fileExists
+    then do
+      unsentAcks <- LOG.handleUnfinishedTxn (LOG.persistentLogName slaveId) (persistentFileName slaveId)
+
+      sequence_ $ List.map (\txn_id -> do
+                              h <- KVProtocol.connectToMaster (cfg state)
+                              KVProtocol.sendMessage h (KVAck txn_id (Just slaveId))
+                              IO.hClose h
+                            )
+                            unsentAcks
+    else do
+      _ <- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
+      return ()
+
     state' <- takeMVar mvar
     putMVar mvar $ state' { socket = skt, channel = c }
     forkIO $ runReaderT sendResponses mvar 

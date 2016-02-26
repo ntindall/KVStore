@@ -14,3 +14,6 @@ cabal.sandbox.config
 *.aux
 *.hp
 .stack-work/
+
+# related to kvstore
+#database/ #uncomment this when we have a ton of files

@@ -56,6 +56,8 @@ writeCommit filename msg = do
 
 handleUnfinishedTxn :: FilePath -> FilePath -> IO([(Int,Int)])
 handleUnfinishedTxn logPath storePath = do
+  traceIO $ "attempting to rebuild"
+  
   file <- B.readFile logPath
   let lines = reverse $ C8.split '\n' file
       txnSet = Set.empty
