@@ -80,6 +80,7 @@ runKVSlave = do
               IO.hClose h
             ) unsentAcks
 
+      --TODO :: need to write manifest file, keep track of current state of store (different files per each cycle)
       --flush the in memory out to the persistent store
       B.writeFile (persistentFileName slaveId) (Utils.writeKVList $ Map.toList store')
       --clear the log file

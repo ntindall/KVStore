@@ -66,7 +66,7 @@ rebuild logPath oldStore = do
 
   let unfinishedReqList = Map.toList unfinishedReqs
       unfinishedReqSorted = List.sortBy (\(_,((_, _, ts), _)) (_,((_, _, ts'), _)) -> ts `compare` ts') unfinishedReqList
-      ackAndUpdateList = List.filter (\(_,((_, _, _), b)) -> b == False) unfinishedReqSorted
+      ackAndUpdateList = List.filter (\(_,((_, _, _), b)) -> b == True) unfinishedReqSorted
       updatedStore' = addToStore updatedStore ackAndUpdateList
 
   return (updatedStore', List.map (\(txn_id,_) -> 
