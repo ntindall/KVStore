@@ -15,7 +15,9 @@ import Data.Maybe
 
 import Control.Exception
 import Control.Monad.State
-import KVProtocol
+
+import qualified KVProtocol (getMessage, sendMessage)
+import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
 
 import Debug.Trace
 
@@ -109,7 +111,7 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
 
   put $ MasterState (socket state) newConfig (voteMap state) (ackMap state)
   clientH <- liftIO $ connectTo (fst cfgTuple) (snd cfgTuple)
-  liftIO $ sendMessage clientH $ KVAck (clientId, snd txn_id) $ Just clientId
+  liftIO $ KVProtocol.sendMessage clientH $ KVAck (clientId, snd txn_id) $ Just clientId
   liftIO $ hClose clientH
 
 processMessage (KVAck txn_id (Just slave_id)) = do
@@ -136,7 +138,7 @@ processMessages = do
   (h, _, _) <- liftIO $ accept $ socket state
   --todo forkIO
   traceShowM $ (show state)
-  msg <- liftIO $ getMessage h
+  msg <- liftIO $ KVProtocol.getMessage h
   either (\errmsg -> liftIO $ IO.putStr errmsg) processMessage msg
   liftIO $ hClose h
   processMessages
@@ -147,7 +149,7 @@ sendMsgToRing :: KVMessage                         --request to be forwarded
 sendMsgToRing msg cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
   where forwardToNode (name, portId) = do
           slaveH <- connectTo name portId
-          sendMessage slaveH msg
+          KVProtocol.sendMessage slaveH msg
           hClose slaveH
 
 sendMsgToClient :: KVMessage
@@ -157,5 +159,5 @@ sendMsgToClient msg cfg = do
   let clientId = fst (txn_id msg)
       clientCfg = Lib.clientConfig cfg !! clientId
   clientH <- connectTo (fst clientCfg) (snd clientCfg)
-  sendMessage clientH msg
+  KVProtocol.sendMessage clientH msg
   hClose clientH

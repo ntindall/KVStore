@@ -13,6 +13,7 @@ module KVProtocol
   , KVTxnId
   , getMessage
   , sendMessage
+  , connectToMaster
   ) where
 
 import Data.Serialize as CEREAL
@@ -24,6 +25,8 @@ import GHC.Generics (Generic)
 
 import Network
 import System.IO as IO
+
+import qualified Lib
 
 type KVKey = B.ByteString
 type KVVal = B.ByteString
@@ -111,3 +114,7 @@ sendMessage :: Handle -> KVMessage -> IO ()
 sendMessage h msg = do
   traceIO $ "sending " ++ show msg
   C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy msg)
+
+connectToMaster :: Lib.Config -> IO(Handle)
+connectToMaster cfg = connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
+

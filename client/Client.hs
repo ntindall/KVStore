@@ -26,7 +26,10 @@ import Control.Monad.State
 
 -------------------------------------
 
-import KVProtocol
+--TODO, separate PROTOCOL module from TYPES module so things are more
+--human readable
+import qualified KVProtocol (getMessage, sendMessage, connectToMaster)
+import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
 
 import Debug.Trace
 
@@ -83,8 +86,8 @@ registerWithMaster = do
                   _ -> undefined -- TODO extremely hacky
       txn_id = next_txn_id state
 
-  h <- liftIO $ connectTo (Lib.masterHostName config) (Lib.masterPortId config)
-  liftIO $ sendMessage h (KVRegistration (0, txn_id) hostname portId)
+  h <- liftIO $ KVProtocol.connectToMaster config
+  liftIO $ KVProtocol.sendMessage h (KVRegistration (0, txn_id) hostname portId)
 
   waitForFirstAck -- wait for the Master to respond with the initial ack, and
                   -- update the config to self identify with the clientId
@@ -93,7 +96,7 @@ registerWithMaster = do
           state <- get
           let txn_id = next_txn_id state
           (h', _, _) <- liftIO $ NETWORK.accept (skt state)
-          response <- liftIO $ getMessage h'
+          response <- liftIO $ KVProtocol.getMessage h'
 
           either (\errmsg -> do
                   liftIO $ IO.putStr $ errmsg ++ ['\n']
@@ -147,16 +150,16 @@ issueRequests = do
   else do
     liftIO $ (do
       let request' = fromJust request
-      h <- NETWORK.connectTo (Lib.masterHostName config) (Lib.masterPortId config)
+      h <- KVProtocol.connectToMaster config
       
      -- kvReq <- makeRequest
       traceIO $ (show request')
-      sendMessage h request'
+      KVProtocol.sendMessage h request'
 
       IO.hClose h
 
       (h', hostName, portNumber) <- NETWORK.accept s
-      msg <- getMessage h'
+      msg <- KVProtocol.getMessage h'
 
       either (\errmsg -> IO.putStr $ errmsg ++ ['\n'])
              (\kvMsg -> IO.putStr $ (show kvMsg) ++ ['\n'])

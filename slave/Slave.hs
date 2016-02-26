@@ -24,7 +24,9 @@ import Control.Monad
 
 import Debug.Trace
 
-import KVProtocol
+import qualified KVProtocol (getMessage, sendMessage, connectToMaster)
+import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
+
 import Log as LOG
 import qualified Utils
 
@@ -79,7 +81,7 @@ processMessages = do
                      liftIO $ hClose h
                      processMessages)
                    (\(h, hostName, portNumber) -> liftIO $ do
-                     msg <- getMessage h
+                     msg <- KVProtocol.getMessage h
                      either (\err -> IO.putStr $ (show err) ++ ['\n'])
                             (\suc -> do
                               IO.putStr $ (show suc) ++ ['\n'] --print the message 
@@ -120,7 +122,7 @@ handleRequest msg = do
     state <- readMVar mvar
     let config = cfg state
 
-    h <- connectTo (Lib.masterHostName config) (Lib.masterPortId config)
+    h <- KVProtocol.connectToMaster config
     let field_txn  = txn_id msg
         field_request = request msg
         mySlaveId = getMyId config
@@ -133,13 +135,13 @@ handleRequest msg = do
           LOG.writeReady (LOG.persistentLogName mySlaveId) msg
           -- UNLOCK
 
-          sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
+          KVProtocol.sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
           --vote abort if invalid key value
         GetReq key     -> do
           kvMap <- liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
           case (Map.lookup key $ Map.fromList kvMap) of
-            Nothing -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
-            Just val -> sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
+            Nothing -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
+            Just val -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
 
     IO.hClose h
   
@@ -169,8 +171,8 @@ handleDecision msg = do
     LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
     --TODO!!! ! ! ! 
 
-    h <- connectTo (Lib.masterHostName config) (Lib.masterPortId config)
-    sendMessage h (KVAck field_txn (Just mySlaveId))
+    h <- KVProtocol.connectToMaster config
+    KVProtocol.sendMessage h (KVAck field_txn (Just mySlaveId))
     IO.hClose h
 
 handleResponse = undefined
