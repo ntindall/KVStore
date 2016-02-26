@@ -71,19 +71,28 @@ runKVSlave = do
     fileExists <- DIR.doesFileExist (LOG.persistentLogName slaveId)
     if fileExists
     then do
-      unsentAcks <- LOG.handleUnfinishedTxn (LOG.persistentLogName slaveId) (persistentFileName slaveId)
+      store <- liftM (Map.fromList . Utils.readKVList) $ B.readFile $ persistentFileName slaveId
+      (store', unsentAcks) <- LOG.rebuild (LOG.persistentLogName slaveId) store
 
       mapM_ (\txn_id -> do
               h <- KVProtocol.connectToMaster (cfg state)
               KVProtocol.sendMessage h (KVAck txn_id (Just slaveId))
               IO.hClose h
             ) unsentAcks
+
+      --flush the in memory out to the persistent store
+      B.writeFile (persistentFileName slaveId) (Utils.writeKVList $ Map.toList store')
+      --clear the log file
+      B.writeFile (LOG.persistentLogName slaveId) B.empty
+
+      state' <- takeMVar mvar
+      putMVar mvar $ state' { socket = skt, channel = c, store = store' }
     else do
       _ <- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
+      state' <- takeMVar mvar
+      putMVar mvar $ state' { socket = skt, channel = c, store = Map.empty }
       return ()
 
-    state' <- takeMVar mvar
-    putMVar mvar $ state' { socket = skt, channel = c }
     forkIO $ runReaderT sendResponses mvar
     forkIO $ runReaderT checkpoint mvar
 
