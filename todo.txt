@@ -37,3 +37,13 @@
    and ACK so everyone can move on.
 
 
+------------------------------------
+FEB 26 UPDATE
+
+Manifest
+Cache on Master
+Consistent Hashing
+Test
+DELETES
+Better error handling with aborts
+Address todos
