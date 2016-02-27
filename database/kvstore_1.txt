@@ -1,9 +1,1 @@
-3=3
-blah=blahblahblah
-coffee=isblack
-hello=test
-lowercase=UPPERCASE
-test=
-val1=val3
-vamsi=isawesome
-xyz=zzz
+hello=world

@@ -49,6 +49,7 @@ runKVMaster cfg = do
   s <- listenOn (Lib.masterPortId cfg)
   --todo, need to fork client thread (this one, and another one for
   --handling responses from slaves)
+  --no, we don't need to do this, just forkIO in processmessages
   fst `fmap` runStateT processMessages (MasterState s cfg Map.empty Map.empty)
 
 processMessage :: KVMessage -> StateT MasterState IO ()
@@ -158,7 +159,11 @@ sendMsgToClient :: KVMessage
                 -> IO()
 sendMsgToClient msg cfg = do
   let clientId = fst (txn_id msg)
-      clientCfg = Lib.clientConfig cfg !! clientId
-  clientH <- uncurry connectTo clientCfg
-  KVProtocol.sendMessage clientH msg
-  hClose clientH
+      clientCfgList = Lib.clientConfig cfg
+
+  if (clientId > Prelude.length clientCfgList - 1) then return ()
+  else do
+    let clientCfg = Lib.clientConfig cfg !! clientId
+    clientH <- uncurry connectTo clientCfg
+    KVProtocol.sendMessage clientH msg
+    hClose clientH

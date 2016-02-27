@@ -1,4 +1,1 @@
-ATESTTOWORK=5
-hello=5
-nathan=tindall
-vamsi=chitters
+hello=world

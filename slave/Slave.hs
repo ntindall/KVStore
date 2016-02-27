@@ -20,6 +20,8 @@ import Control.Monad.Reader
 import Control.Monad.Catch as Catch
 import Control.Arrow as CA
 
+import System.Exit
+
 import Control.Monad
 
 import Debug.Trace
@@ -80,11 +82,11 @@ runKVSlave = do
               IO.hClose h
             ) unsentAcks
 
-      --TODO :: need to write manifest file, keep track of current state of store (different files per each cycle)
-      --flush the in memory out to the persistent store
-      B.writeFile (persistentFileName slaveId) (Utils.writeKVList $ Map.toList store')
+      B.writeFile ((persistentFileName slaveId) ++ ".bak") (Utils.writeKVList $ Map.toList store')
       --clear the log file
       B.writeFile (LOG.persistentLogName slaveId) B.empty
+      --overwrite the old store
+      DIR.renameFile ((persistentFileName slaveId) ++ ".bak") (persistentFileName slaveId)
 
       state' <- takeMVar mvar
       putMVar mvar $ state' { socket = skt, channel = c, store = store' }
@@ -192,6 +194,7 @@ handleRequest msg = do
 
 handleDecision :: KVMessage -> ReaderT (MVar SlaveState) IO ()
 handleDecision msg = do
+  liftIO exitSuccess --DIE!
   mvar <- ask
   liftIO $ do
     state <- readMVar mvar
