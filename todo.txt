@@ -40,7 +40,9 @@
 ------------------------------------
 FEB 26 UPDATE
 
-Manifest
+Manifest --DONE 2/27
+------------------
+
 Cache on Master
 Consistent Hashing
 Test

@@ -108,11 +108,14 @@ getMessage h = do
   bytes <- C8.hGetContents h
   if C8.null bytes
   then return $ Left "Handle is empty"
-  else return $ decodeMsg (fromStrict bytes)
+  else do
+    let msg = decodeMsg (fromStrict bytes)
+    traceIO $ "[!] Received: " ++ show msg
+    return $ decodeMsg (fromStrict bytes)
 
 sendMessage :: Handle -> KVMessage -> IO ()
 sendMessage h msg = do
-  traceIO $ "sending " ++ show msg
+  traceIO $ "[!] Sending: " ++ show msg
   C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy msg)
 
 connectToMaster :: Lib.Config -> IO Handle

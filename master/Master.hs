@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-
+{-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
 import Lib
@@ -15,6 +15,7 @@ import Data.Maybe
 
 import Control.Exception
 import Control.Monad.State
+import Control.Concurrent
 
 import qualified KVProtocol (getMessage, sendMessage)
 import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
@@ -122,8 +123,6 @@ processMessage (KVAck txn_id (Just slave_id)) = do
   let acks = if Map.member txn_id (ackMap s) then ackMap s else Map.insert txn_id Set.empty (ackMap s)
       slvIds = fromJust $ Map.lookup txn_id acks
 
-  traceShowM $ show s
-
   if not (Set.member slave_id slvIds) && Set.size slvIds == Prelude.length (Lib.slaveConfig $ cfg s) - 1
   then do --the ACK we are processing is the last ack from the ring
     put $ s { ackMap = Map.delete txn_id acks, voteMap = Map.delete txn_id $ voteMap s }
@@ -139,9 +138,8 @@ processMessages = do
   state <- get
   (h, _, _) <- liftIO $ accept $ socket state
   --todo forkIO
-  traceShowM $ show state
   msg <- liftIO $ KVProtocol.getMessage h
-  either (liftIO . IO.putStr) processMessage msg
+  either (liftIO . IO.putStr) processMessage msg -- forkIO here
   liftIO $ hClose h
   processMessages
 
@@ -150,9 +148,17 @@ sendMsgToRing :: KVMessage                         --request to be forwarded
               -> [IO()]
 sendMsgToRing msg cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
   where forwardToNode (name, portId) = do
-          slaveH <- connectTo name portId
+          slaveH <- mandateConnection name portId
           KVProtocol.sendMessage slaveH msg
           hClose slaveH
+        mandateConnection name portId = do
+          result <- try $ connectTo name portId
+          case result of
+            Left (e :: SomeException) -> do 
+                    threadDelay 500000
+                    mandateConnection name portId
+            Right h -> return h
+
 
 sendMsgToClient :: KVMessage
                 -> Lib.Config
