@@ -104,7 +104,6 @@ registerWithMaster = do
                   waitForFirstAck
                  )
                  (\kvMsg -> do
-                    liftIO $ IO.putStr $ show kvMsg ++ "\n"
                     case kvMsg of
                       (KVAck (clientId, txn_id) _) -> do
                         let config' = (cfg state) { Lib.clientNumber = Just clientId}
@@ -151,18 +150,12 @@ issueRequests = do
       let request' = fromJust request
       h <- KVProtocol.connectToMaster config
 
-     -- kvReq <- makeRequest
-      traceIO (show request')
       KVProtocol.sendMessage h request'
 
       IO.hClose h
 
       (h', hostName, portNumber) <- NETWORK.accept s
       msg <- KVProtocol.getMessage h'
-
-      either (\errmsg -> IO.putStr $ errmsg ++ "\n")
-             (\kvMsg -> IO.putStr $ show kvMsg ++ "\n")
-             msg
 
       IO.hClose h'
       )

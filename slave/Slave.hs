@@ -131,10 +131,7 @@ processMessages = do
                    (\(h, hostName, portNumber) -> liftIO $ do
                      msg <- KVProtocol.getMessage h
                      either (\err -> IO.putStr $ show err ++ "\n")
-                            (\suc -> do
-                              IO.putStr $ show suc ++ "\n" --print the message
-                              writeChan c suc
-                            )
+                            (\suc -> writeChan c suc)
                             msg
                    )
 
@@ -194,7 +191,7 @@ handleRequest msg = do
 
 handleDecision :: KVMessage -> ReaderT (MVar SlaveState) IO ()
 handleDecision msg = do
-  liftIO exitSuccess --DIE!
+  --liftIO exitSuccess --DIE!
   mvar <- ask
   liftIO $ do
     state <- readMVar mvar

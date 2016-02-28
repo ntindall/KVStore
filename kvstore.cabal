@@ -18,11 +18,12 @@ library
   exposed-modules:     Lib, KVProtocol, Log, Utils
   build-depends:       base >= 4.7 && < 5
                      , network
-                     , bytestring
+                     , bytestring >= 0.10
                      , cereal
                      , containers >= 0.5
                      , time
                      , directory
+                     , rainbow
   default-language:    Haskell2010
 
 executable kvstore-master
@@ -34,6 +35,7 @@ executable kvstore-master
                      , network
                      , bytestring
                      , mtl
+                     , exceptions
                      , containers >= 0.5
   default-language:    Haskell2010
 

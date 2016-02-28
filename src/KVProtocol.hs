@@ -25,6 +25,7 @@ import GHC.Generics (Generic)
 
 import Network
 import System.IO as IO
+import Rainbow as Rainbow
 
 import qualified Lib
 
@@ -110,14 +111,27 @@ getMessage h = do
   then return $ Left "Handle is empty"
   else do
     let msg = decodeMsg (fromStrict bytes)
-    traceIO $ "[!] Received: " ++ show msg
+
+        color = either (\e -> brightRed)
+                       (\m -> prettyPrint m)
+                       msg
+
+
+    Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
     return $ decodeMsg (fromStrict bytes)
 
 sendMessage :: Handle -> KVMessage -> IO ()
 sendMessage h msg = do
-  traceIO $ "[!] Sending: " ++ show msg
+ -- let color = prettyPrint msg
   C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy msg)
+  Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow
 
 connectToMaster :: Lib.Config -> IO Handle
 connectToMaster cfg = connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
+
+prettyPrint :: KVMessage -> Radiant
+prettyPrint m = case m of
+                  KVAck{}  -> brightGreen
+                  KVVote{} -> brightMagenta
+                  _        -> brightCyan
 
