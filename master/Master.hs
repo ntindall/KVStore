@@ -139,8 +139,8 @@ sendResponse (KVAck txn_id (Just slave_id)) = do
   liftIO $ do
     state <- takeMVar mvar
 
-    let acks = if Map.member txn_id (ackMap state) then ackMap state else Map.insert txn_id Set.empty (ackMap state)
-        slvIds = fromJust $ Map.lookup txn_id acks
+    let acks = ackMap state
+        slvIds = fromJust $ Map.lookup txn_id acks -- ack map was added on decision send
 
     if not (Set.member slave_id slvIds) && Set.size slvIds == Prelude.length (Lib.slaveConfig $ cfg state) - 1
     then do --the ACK we are processing is the last ack from the ring
@@ -163,6 +163,25 @@ sendResponses = do
 
   sendResponses
 
+sendDecision :: KVMessage -> ReaderT (MVar MasterState) IO ()
+sendDecision msg@(KVDecision txn_id decision _) = do
+  mvar <- ask
+  liftIO $ do
+    state <- takeMVar mvar
+    putMVar mvar $ state { ackMap = Map.insert txn_id Set.empty (ackMap state) } -- Note: this should not already exist in map
+  sendDecisionWithRetry msg 1
+sendDecision _ = undefined
+
+sendDecisionWithRetry :: KVMessage -> Integer -> ReaderT (MVar MasterState) IO ()
+sendDecisionWithRetry decision timeout = do
+  mvar <- ask
+  state <- liftIO $ readMVar mvar
+  let acks = Map.lookup (txn_id decision) (ackMap state)
+  if acks == Nothing then return ()
+  else sendDecisionWithRetry decision (timeout * 2)
+
+sendDecisionWithRetry _ _ = undefined
+
 processMessages :: ReaderT (MVar MasterState) IO ()
 processMessages = do
   mvar <- ask
@@ -179,8 +198,7 @@ processMessages = do
                      either (\err -> IO.putStr $ show err ++ "\n")
                             (\suc -> writeChan c suc)
                             msg
-                   )
-
+                   )    
 
 sendMsgToRing :: KVMessage                         --request to be forwarded
               -> Lib.Config                        --ring configuration
