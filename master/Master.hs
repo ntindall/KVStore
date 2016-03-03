@@ -10,6 +10,8 @@ import Data.ByteString.Lazy as B
 import Data.ByteString.Char8 as C8
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Sequence as Seq
+import qualified Data.Foldable as Foldable
 
 import Data.Maybe
 
@@ -19,11 +21,12 @@ import Control.Monad.Catch as Catch
 import Control.Concurrent
 import Control.Concurrent.Chan
 
-import qualified KVProtocol (getMessage, sendMessage)
+import qualified KVProtocol (getMessage, sendMessage, kV_TIMEOUT)
 import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
 
 import Debug.Trace
 
+import qualified Utils
 
 --https://hackage.haskell.org/package/lrucache-1.2.0.0/docs/Data-Cache-LRU.html
 data MasterState = MasterState {
@@ -40,10 +43,14 @@ data MasterState = MasterState {
                   --when the last ACK is received, the master removes the txn_id
                   --from both Maps and sends an acknowledgement to the client.
                 , ackMap  :: Map.Map KVTxnId (Set.Set Int)
+                  --timeout map. Map from transaction id to when the server first
+                  --sent a KVRequest to a shard
+                , timeoutMap :: Map.Map KVTxnId Int
                 }
 
 instance Show (MasterState) where
-  show (MasterState skt _ cfg voteMap ackMap) = show skt ++ show cfg ++ show voteMap ++ show ackMap
+  show (MasterState skt _ cfg voteMap ackMap timeoutMap) = 
+    show skt ++ show cfg ++ show voteMap ++ show ackMap ++ show timeoutMap
 
 
 
@@ -58,7 +65,7 @@ runKVMaster :: Lib.Config -> IO ()
 runKVMaster cfg = do 
   s <- listenOn (Lib.masterPortId cfg)
   c <- newChan
-  mvar <- newMVar (MasterState s c cfg Map.empty Map.empty)
+  mvar <- newMVar (MasterState s c cfg Map.empty Map.empty Map.empty)
   forkIO $ runReaderT processMessages mvar
   runReaderT sendResponses mvar
 
@@ -66,23 +73,35 @@ sendResponse :: KVMessage -> ReaderT (MVar MasterState) IO ()
 sendResponse (KVVote _ _ VoteAbort request) = undefined
 sendResponse (KVVote txn_id slave_id VoteReady request) = do
   mvar <- ask
+  state <- liftIO $ takeMVar mvar
+  let oldVoteMap = voteMap state
+      oldVotes = Map.lookup txn_id oldVoteMap
+      oldVoteMap' = case oldVotes of
+                  Nothing -> Map.insert txn_id Set.empty oldVoteMap
+                  (Just _) -> oldVoteMap
+      oldVotes' = Map.lookup txn_id oldVoteMap'
+      newSet = Set.insert slave_id $ fromJust oldVotes'
+      newVoteMap = Map.insert txn_id newSet oldVoteMap'
+      timeoutMap' = timeoutMap state
+
   liftIO $ do
-    state <- takeMVar mvar
-    let oldMap = voteMap state
-        oldVotes = Map.lookup txn_id oldMap
-        oldMap' = case oldVotes of
-                    Nothing -> Map.insert txn_id Set.empty oldMap
-                    (Just _) -> oldMap
-        oldVotes' = Map.lookup txn_id oldMap'
-        newSet = Set.insert slave_id $ fromJust oldVotes'
-        newVoteMap = Map.insert txn_id newSet oldMap'
-
-    if Set.size newSet == Prelude.length (Lib.slaveConfig $ cfg state)
-    then liftIO $ sequence $ sendMsgToRing (KVDecision txn_id DecisionCommit request) (cfg state)
-    else liftIO $ sequence [return ()]
-
     let state' = state {voteMap = newVoteMap } 
     putMVar mvar state'
+
+  now <- liftIO $ Utils.currentTimeInt
+
+  liftIO $ traceIO (show state)
+
+  if Set.size newSet == Prelude.length (Lib.slaveConfig $ cfg state)
+  then sendDecisionToRing (KVDecision txn_id DecisionCommit request) 
+  else 
+    case Map.lookup txn_id timeoutMap' of
+      Nothing -> liftIO $ return ()
+      Just ts -> 
+        if now - KVProtocol.kV_TIMEOUT >= ts
+        then sendDecisionToRing (KVDecision txn_id DecisionAbort request)
+        else
+          liftIO $ return () --TODO:: A NICER WAY TO SAY THIS
 
 sendResponse kvMsg@(KVResponse txn_id slave_id _) = do
   mvar <- ask
@@ -110,11 +129,19 @@ sendResponse kvMsg@(KVResponse txn_id slave_id _) = do
 
         putMVar mvar $ state { ackMap = newAckMap'} --MasterState (socket state) (cfg state) (voteMap state) newAckMap'
 
-sendResponse kvMsg@(KVRequest _ _) = do
+sendResponse kvMsg@(KVRequest txn_id _) = do
   mvar <- ask
   liftIO $ do 
-    state <- readMVar mvar
-    liftIO $ sequence $ sendMsgToRing kvMsg (cfg state)
+
+    --Communicating with shard for the first time, keep track of this in the
+    --timeout map
+    state <- takeMVar mvar
+    now <- Utils.currentTimeInt
+    let updatedTimeoutMap = Map.insert txn_id now (timeoutMap state)
+    putMVar mvar $ state { timeoutMap = updatedTimeoutMap }
+
+    state' <- readMVar mvar
+    liftIO $ sendMsgToRing kvMsg (cfg state')
     return ()
 
 sendResponse kvMsg@(KVRegistration txn_id hostName portId) = do
@@ -139,12 +166,16 @@ sendResponse (KVAck txn_id (Just slave_id)) = do
   liftIO $ do
     state <- takeMVar mvar
 
-    let acks = ackMap state
+    let acks = ackMap state --should already exist in map TODO... bug?
+               -- if Map.member txn_id (ackMap state) then ackMap state else Map.insert txn_id Set.empty (ackMap state)
         slvIds = fromJust $ Map.lookup txn_id acks -- ack map was added on decision send
 
     if not (Set.member slave_id slvIds) && Set.size slvIds == Prelude.length (Lib.slaveConfig $ cfg state) - 1
     then do --the ACK we are processing is the last ack from the ring
-      putMVar mvar $ state { ackMap = Map.delete txn_id acks, voteMap = Map.delete txn_id $ voteMap state}
+      putMVar mvar $ state { ackMap = Map.delete txn_id acks, 
+                             voteMap = Map.delete txn_id $ voteMap state,
+                             timeoutMap = Map.delete txn_id $ timeoutMap state
+                           }
       liftIO $ sendMsgToClient (KVAck txn_id Nothing) (cfg state) -- todo: these should just not return anything
 
     else putMVar mvar $ state { ackMap = Map.insert txn_id (Set.insert slave_id slvIds) acks }
@@ -163,24 +194,59 @@ sendResponses = do
 
   sendResponses
 
-sendDecision :: KVMessage -> ReaderT (MVar MasterState) IO ()
-sendDecision msg@(KVDecision txn_id decision _) = do
+sendDecisionToRing :: KVMessage -> ReaderT (MVar MasterState) IO ()
+sendDecisionToRing msg@(KVDecision txn_id decision req) = do
   mvar <- ask
   liftIO $ do
     state <- takeMVar mvar
     putMVar mvar $ state { ackMap = Map.insert txn_id Set.empty (ackMap state) } -- Note: this should not already exist in map
-  sendDecisionWithRetry msg 1
-sendDecision _ = undefined
+  
+  shard <- consistentHashing msg
 
-sendDecisionWithRetry :: KVMessage -> Integer -> ReaderT (MVar MasterState) IO ()
-sendDecisionWithRetry decision timeout = do
+  liftIO $ mapM_ (\node -> do
+                    forkIO $ runReaderT (forwardToNodeWithRetry node msg KVProtocol.kV_TIMEOUT) mvar
+                  ) shard 
+
+forwardToNodeWithRetry :: (Int,HostName, PortID)
+                            -> KVMessage
+                            -> Int
+                            -> ReaderT (MVar MasterState) IO()
+forwardToNodeWithRetry (myId, hostName, portId) msg timeout = do
   mvar <- ask
-  state <- liftIO $ readMVar mvar
-  let acks = Map.lookup (txn_id decision) (ackMap state)
-  if acks == Nothing then return ()
-  else sendDecisionWithRetry decision (timeout * 2)
+  state <- liftIO $ takeMVar mvar
+  let acks = Map.lookup (txn_id msg) (ackMap state)
 
-sendDecisionWithRetry _ _ = undefined
+    --if there are no acks in the map, then all of the nodes in the ring have responded
+    --if the set of acks contains the current slave id, then we can also stop resending,
+    --as this node has responded
+  liftIO $ traceIO $ "hello"
+  if (acks == Nothing || Set.member myId (fromJust acks)) then do
+    liftIO $ putMVar mvar state
+  else do
+    liftIO $ do
+      putMVar mvar state
+      forwardToNode (hostName, portId) msg
+      threadDelay $ timeout * 10000
+    forwardToNodeWithRetry (myId, hostName, portId) msg (timeout * 2)
+
+
+consistentHashing :: KVMessage -> ReaderT (MVar MasterState) IO ([(Int,HostName, PortID)])
+consistentHashing msg = do
+  mvar <- ask
+  liftIO $ do
+    state <- readMVar mvar
+    let config = cfg state
+        slaves = slaveConfig config
+    --TODO: something smarter
+    return $ Foldable.toList $ Seq.mapWithIndex (\i (h,p) -> (i,h,p)) (Seq.fromList slaves)
+
+--sendDecisionToRingWithRetry :: KVMessage -> Integer -> ReaderT (MVar MasterState) IO ()
+--sendDecisionToRingWithRetry decision timeout = do
+--  mvar <- ask
+--  state <- liftIO $ readMVar mvar
+--  let acks = Map.lookup (txn_id decision) (ackMap state)
+--  if acks == Nothing then return ()
+--  else sendDecisionToRingWithRetry decision (timeout * 2)
 
 processMessages :: ReaderT (MVar MasterState) IO ()
 processMessages = do
@@ -202,13 +268,15 @@ processMessages = do
 
 sendMsgToRing :: KVMessage                         --request to be forwarded
               -> Lib.Config                        --ring configuration
-              -> [IO()]
-sendMsgToRing msg cfg = Prelude.map forwardToNode (Lib.slaveConfig cfg)
-  where forwardToNode (name, portId) = do
-          slaveH <- mandateConnection name portId
-          KVProtocol.sendMessage slaveH msg
-          hClose slaveH
-        mandateConnection name portId = do
+              -> IO [ThreadId]
+sendMsgToRing msg cfg = mapM (\(h,p) -> forkIO $ forwardToNode (h,p) msg) (Lib.slaveConfig cfg)
+
+forwardToNode :: (HostName, PortID) -> KVMessage -> IO()
+forwardToNode (name, portId) msg = do
+    slaveH <- mandateConnection name portId
+    KVProtocol.sendMessage slaveH msg
+    hClose slaveH
+  where mandateConnection name portId = do
           result <- Catch.try $ connectTo name portId
           case result of
             Left (e :: SomeException) -> do 

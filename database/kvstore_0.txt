@@ -1,6 +1,1 @@
-black=tea
-darkroasted=coffee
-green=tea
-hello=3
-matcha=tea
-vamsi=chitters
+hello=4
