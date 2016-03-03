@@ -79,9 +79,7 @@ listen = ask >>= \mvar -> do
   listen
 
 timeoutThread :: ReaderT (MVar MasterState) IO ()
-timeoutThread = do
-  mvar <- ask
-
+timeoutThread = ask >>= \mvar -> do
 --  liftIO $ traceIO "Timing out! in timeout thread!"
 
   state <- liftIO $ readMVar mvar
@@ -170,25 +168,23 @@ sendResponse kvMsg@(KVRequest txn_id req) = ask >>= \mvar -> do
 
   sendMsgToRing kvMsg
 
-sendResponse kvMsg@(KVRegistration txn_id hostName portId) = do
-  mvar <- ask
-  liftIO $ do
-    state <- takeMVar mvar
-    let oldConfig = cfg state
-        oldClientCfg = Lib.clientConfig oldConfig
-        cfgTuple = (hostName, PortNumber $ toEnum portId)
-        newClientCfg = oldClientCfg ++ [cfgTuple]
-        newConfig = oldConfig { clientConfig = newClientCfg }
-        clientId = Prelude.length newClientCfg - 1
+sendResponse kvMsg@(KVRegistration txn_id hostName portId) = ask >>= \mvar -> liftIO $ do
+  state <- takeMVar mvar
+  let oldConfig = cfg state
+      oldClientCfg = Lib.clientConfig oldConfig
+      cfgTuple = (hostName, PortNumber $ toEnum portId)
+      newClientCfg = oldClientCfg ++ [cfgTuple]
+      newConfig = oldConfig { clientConfig = newClientCfg }
+      clientId = Prelude.length newClientCfg - 1
 
-    putMVar mvar $ state {cfg = newConfig} 
+  putMVar mvar $ state {cfg = newConfig} 
 
-    clientH <- liftIO $ uncurry connectTo cfgTuple
-    liftIO $ KVProtocol.sendMessage clientH $ KVAck (clientId, snd txn_id) $ Just clientId
-    liftIO $ hClose clientH
+  clientH <- liftIO $ uncurry connectTo cfgTuple
+  KVProtocol.sendMessage clientH $ KVAck (clientId, snd txn_id) $ Just clientId
+  hClose clientH
 
-sendResponse (KVAck txn_id (Just slave_id)) = do
-  mvar <- ask
+
+sendResponse (KVAck txn_id (Just slave_id)) = ask >>= \mvar -> do
   liftIO $ do
     state <- takeMVar mvar
 
@@ -209,8 +205,7 @@ sendResponse (KVAck txn_id (Just slave_id)) = do
 sendResponse _ = undefined
 
 sendResponses :: ReaderT (MVar MasterState) IO ()
-sendResponses = do
-  mvar <- ask
+sendResponses = ask >>= \mvar -> do
   liftIO $ do
     state <- readMVar mvar
     message <- readChan (channel state)
@@ -220,8 +215,7 @@ sendResponses = do
   sendResponses
 
 sendDecisionToRing :: KVMessage -> ReaderT (MVar MasterState) IO ()
-sendDecisionToRing msg@(KVDecision txn_id decision req) = do
-  mvar <- ask
+sendDecisionToRing msg@(KVDecision txn_id decision req) = ask >>= \mvar -> do
   liftIO $ do
     state <- takeMVar mvar
     putMVar mvar $ state { ackMap = Map.insert txn_id Set.empty (ackMap state) } -- Note: this should not already exist in map
@@ -236,34 +230,28 @@ forwardToNodeWithRetry :: (Int,HostName, PortID)
                             -> KVMessage
                             -> Int
                             -> ReaderT (MVar MasterState) IO()
-forwardToNodeWithRetry (myId, hostName, portId) msg timeout = do
-  mvar <- ask
-  state <- liftIO $ takeMVar mvar
+forwardToNodeWithRetry (myId, hostName, portId) msg timeout = ask >>= \mvar -> do
+  state <- liftIO $ readMVar mvar
   let acks = Map.lookup (txn_id msg) (ackMap state)
 
     --if there are no acks in the map, then all of the nodes in the ring have responded
     --if the set of acks contains the current slave id, then we can also stop resending,
     --as this node has responded
   if (acks == Nothing || Set.member myId (fromJust acks)) then do
-    liftIO $ putMVar mvar state
+    liftIO $ return ()
   else do
-    liftIO $ putMVar mvar state
     
     forwardToNode (myId, hostName, portId) msg
-    liftIO $ threadDelay $ timeout * 10000 --TODO... why does MVAR behave incorrectly with small delay??? sounds bad.... race??? why?
-                                    --no error when we don't recurse...
+    liftIO $ threadDelay $ timeout * 10000 -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
     forwardToNodeWithRetry (myId, hostName, portId) msg (timeout * 2)
 
-
 consistentHashing :: KVMessage -> ReaderT (MVar MasterState) IO ([(Int,HostName, PortID)])
-consistentHashing msg = do
-  mvar <- ask
-  liftIO $ do
-    state <- readMVar mvar
-    let config = cfg state
-        slaves = slaveConfig config
-    --TODO: something smarter
-    return $ Foldable.toList $ Seq.mapWithIndex (\i (h,p) -> (i,h,p)) (Seq.fromList slaves)
+consistentHashing msg = ask >>= \mvar -> liftIO $ do
+  state <- readMVar mvar
+  let config = cfg state
+      slaves = slaveConfig config
+  --TODO: something smarter
+  return $ Foldable.toList $ Seq.mapWithIndex (\i (h,p) -> (i,h,p)) (Seq.fromList slaves)
 
 --sendDecisionToRingWithRetry :: KVMessage -> Integer -> ReaderT (MVar MasterState) IO ()
 --sendDecisionToRingWithRetry decision timeout = do
@@ -303,9 +291,8 @@ tryConnect :: HostName
 tryConnect name portId msg = do
   result <- liftIO $ Catch.try $ connectTo name portId
   case result of
-    Left (e :: SomeException) -> do
-      mvar <- ask 
-      liftIO $ do
+    Left (e :: SomeException) -> 
+      ask >>= \mvar -> liftIO $ do
         -- the connection time out, meaning that the transaction should be aborted.
         -- mark this in the timeout map so the timeout thread behaves appropriately.
         state <- takeMVar mvar
