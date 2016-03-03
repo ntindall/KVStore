@@ -41,7 +41,7 @@ data SlaveState = SlaveState {
                   socket :: Socket
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
-                , store :: Map.Map B.ByteString B.ByteString
+                , store :: Map.Map KVKey KVVal
                 , unresolvedTxns :: Map.Map KVTxnId KVMessage
                 }
  --  deriving (Show)
@@ -75,22 +75,17 @@ runKVSlave = do
     if fileExists
     then do
       store <- liftM (Map.fromList . Utils.readKVList) $ B.readFile $ persistentFileName slaveId
-      (store', unsentAcks) <- LOG.rebuild (LOG.persistentLogName slaveId) store
-
-      mapM_ (\txn_id -> do
-              h <- KVProtocol.connectToMaster (cfg state)
-              KVProtocol.sendMessage h (KVAck txn_id (Just slaveId))
-              IO.hClose h
-            ) unsentAcks
+      (recoveredTxns, store') <- LOG.rebuild (LOG.persistentLogName slaveId) store
 
       B.writeFile ((persistentFileName slaveId) ++ ".bak") (Utils.writeKVList $ Map.toList store')
       --clear the log file
-      B.writeFile (LOG.persistentLogName slaveId) B.empty
+      --B.writeFile (LOG.persistentLogName slaveId) B.empty
+      --TODO: don't clear log until all of these recoveredTxns ahve been acked (need either separate map or tuple).
       --overwrite the old store
       DIR.renameFile ((persistentFileName slaveId) ++ ".bak") (persistentFileName slaveId)
 
       state' <- takeMVar mvar
-      putMVar mvar $ state' { socket = skt, channel = c, store = store' }
+      putMVar mvar $ state' { socket = skt, channel = c, store = store', unresolvedTxns = recoveredTxns }
     else do
       _ <- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
       state' <- takeMVar mvar
