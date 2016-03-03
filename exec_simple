@@ -1,0 +1,13 @@
+#!/bin/bash
+#This simple script opens the master and initiailizes the ring with one node and
+#one client
+
+MYDIR=$PWD
+
+osascript scripts/master.AppleScript $MYDIR 1
+sleep 1 s
+
+osascript scripts/client.AppleScript $MYDIR 1
+sleep 1 s
+
+osascript scripts/worker.AppleScript $MYDIR 1 0
