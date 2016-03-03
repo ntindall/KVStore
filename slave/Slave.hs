@@ -42,6 +42,7 @@ data SlaveState = SlaveState {
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
                 , store :: Map.Map B.ByteString B.ByteString
+                , unresolvedTxns :: Map.Map KVTxnId KVMessage
                 }
  --  deriving (Show)
 
@@ -55,7 +56,7 @@ main = do
       in if slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config)
          then Lib.printUsage --error
          else do
-           mvar <- newMVar SlaveState {cfg = config, store = Map.empty }
+           mvar <- newMVar SlaveState {cfg = config, store = Map.empty, unresolvedTxns = Map.empty }
            runReaderT runKVSlave mvar
 
 runKVSlave :: ReaderT (MVar SlaveState) IO ()
@@ -176,8 +177,13 @@ handleRequest msg = do
         PutReq key val -> do
           -- LOG READY, <timestamp, txn_id, key, newval>
 
+          state' <- takeMVar mvar
+          let updatedTxnMap = Map.insert field_txn msg (unresolvedTxns state')
+          putMVar mvar $ state' {unresolvedTxns = updatedTxnMap}
+
           -- LOCK!!!@!@! !@ ! !
           LOG.writeReady (LOG.persistentLogName mySlaveId) msg
+
           -- UNLOCK
 
           KVProtocol.sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
@@ -208,7 +214,8 @@ handleDecision msg = do
     --WRITE TO FILE
     state' <- takeMVar mvar
     let updatedStore = Map.insert key val (store state')
-    putMVar mvar $ state' {store = updatedStore}
+        updatedTxnMap = Map.delete field_txn (unresolvedTxns state')
+    putMVar mvar $ state' {store = updatedStore, unresolvedTxns = updatedTxnMap}
 
     --liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
     --let updatedKvMap = Map.insert key val (Map.fromList kvMap)
