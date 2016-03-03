@@ -2,6 +2,7 @@ module Lib
     ( printUsage
     , options
     , parseArguments
+    , fst'
     , Mode
     , Config(..)
     ) where
