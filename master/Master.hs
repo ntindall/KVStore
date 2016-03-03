@@ -140,9 +140,8 @@ sendResponse kvMsg@(KVRequest txn_id _) = do
     let updatedTimeoutMap = Map.insert txn_id now (timeoutMap state)
     putMVar mvar $ state { timeoutMap = updatedTimeoutMap }
 
-    state' <- readMVar mvar
-    liftIO $ sendMsgToRing kvMsg (cfg state')
-    return ()
+  sendMsgToRing kvMsg
+  return ()
 
 sendResponse kvMsg@(KVRegistration txn_id hostName portId) = do
   mvar <- ask
@@ -223,10 +222,11 @@ forwardToNodeWithRetry (myId, hostName, portId) msg timeout = do
   if (acks == Nothing || Set.member myId (fromJust acks)) then do
     liftIO $ putMVar mvar state
   else do
-    liftIO $ do
-      putMVar mvar state
-      forwardToNode (hostName, portId) msg
-      threadDelay $ timeout * 10000
+    liftIO $ putMVar mvar state
+    
+    forwardToNode (myId, hostName, portId) msg
+    liftIO $ threadDelay $ timeout * 10000 --TODO... why does MVAR behave incorrectly with small delay??? sounds bad.... race??? why?
+                                    --no error when we don't recurse...
     forwardToNodeWithRetry (myId, hostName, portId) msg (timeout * 2)
 
 
@@ -266,23 +266,67 @@ processMessages = do
                             msg
                    )    
 
-sendMsgToRing :: KVMessage                         --request to be forwarded
-              -> Lib.Config                        --ring configuration
-              -> IO [ThreadId]
-sendMsgToRing msg cfg = mapM (\(h,p) -> forkIO $ forwardToNode (h,p) msg) (Lib.slaveConfig cfg)
 
-forwardToNode :: (HostName, PortID) -> KVMessage -> IO()
-forwardToNode (name, portId) msg = do
-    slaveH <- mandateConnection name portId
-    KVProtocol.sendMessage slaveH msg
-    hClose slaveH
-  where mandateConnection name portId = do
-          result <- Catch.try $ connectTo name portId
-          case result of
-            Left (e :: SomeException) -> do 
-                    threadDelay 500000
-                    mandateConnection name portId
-            Right h -> return h
+sendMsgToRing :: KVMessage -> ReaderT (MVar MasterState) IO ()
+sendMsgToRing msg = do
+  mvar <- ask
+
+  shard <- consistentHashing msg
+
+  liftIO $ mapM_ (\node -> do
+                    forkIO $ runReaderT (forwardToNode node msg) mvar
+                  ) shard 
+
+forwardToNode :: (Int,HostName, PortID)
+              -> KVMessage
+              -> ReaderT (MVar MasterState) IO()
+forwardToNode (myId, hostName, portId) msg = do
+  result <- tryConnect hostName portId msg
+  case result of
+    Just h -> do
+      liftIO $ do
+        KVProtocol.sendMessage h msg
+        hClose h
+    Nothing -> liftIO $ return ()
+
+tryConnect :: HostName
+           -> PortID
+           -> KVMessage
+           -> ReaderT (MVar MasterState) IO(Maybe Handle)
+tryConnect name portId msg = do
+  result <- liftIO $ Catch.try $ connectTo name portId
+  case result of
+    Left (e :: SomeException) -> do
+      mvar <- ask 
+      liftIO $ do
+        -- the connection time out, meaning that the transaction should be aborted.
+        -- mark this in the timeout map so the timeout thread behaves appropriately.
+        state <- takeMVar mvar
+        let updatedTimeoutMap = Map.insert (txn_id msg) 0 (timeoutMap state)
+        putMVar mvar $ state { timeoutMap = updatedTimeoutMap }
+
+        return Nothing
+
+    Right h -> liftIO $ return (Just h)
+
+--sendMsgToRing :: KVMessage                         --request to be forwarded
+--              -> Lib.Config                        --ring configuration
+--              -> IO [ThreadId]
+--sendMsgToRing msg cfg = mapM (\(h,p) -> forkIO $ forwardToNode (h,p) msg) (Lib.slaveConfig cfg)
+
+--forwardToNode :: (HostName, PortID) -> KVMessage -> IO()
+--forwardToNode (name, portId) msg = do
+--    slaveH <- handleError name portId
+--    KVProtocol.sendMessage slaveH msg
+--    hClose slaveH
+--  where handleError name portId = do
+--          result <- Catch.try $ connectTo name portId
+--          case result of
+--            Left (e :: SomeException) -> do 
+
+--                    threadDelay 500000
+--                    mandateConnection name portId
+--            Right h -> return h
 
 
 sendMsgToClient :: KVMessage

@@ -87,7 +87,7 @@ runKVSlave = do
       state' <- takeMVar mvar
       putMVar mvar $ state' { socket = skt, channel = c, store = store', unresolvedTxns = recoveredTxns }
     else do
-      _ <- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
+     -- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
       state' <- takeMVar mvar
       putMVar mvar $ state' { socket = skt, channel = c, store = Map.empty }
       return ()

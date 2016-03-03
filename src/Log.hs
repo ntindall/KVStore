@@ -72,7 +72,7 @@ handleLines :: [B.ByteString]                      --each line in the file
             -> Map.Map B.ByteString (KVKey, KVVal) --unmatched ready map accumulator
             -> Map.Map KVKey KVVal                 --store accumulator
             -> IO(Map.Map B.ByteString (KVKey, KVVal), Map.Map KVKey KVVal)
---handleLines [] unmatchedReadyMap storeMap = return (unmatchedReadyMap, storeMap)
+handleLines [] unmatchedReadyMap storeMap = return (unmatchedReadyMap, storeMap)
 handleLines (x:xs) unmatchedReadyMap storeMap 
   | C8.null x = handleLines xs unmatchedReadyMap storeMap
   | C8.length x < 3 = do
