@@ -99,30 +99,36 @@ timeoutThread = do
   liftIO $ threadDelay 10000000
   timeoutThread
 
+addVote :: KVTxnId -> Int -> ReaderT (MVar MasterState) IO ()
+addVote tid sid = ask >>= \mvar -> liftIO $ do
+  s <- takeMVar mvar
+  let v = fromJust $ Map.lookup tid (voteMap s)
+  putMVar mvar s { voteMap = Map.insert tid (Set.insert sid v) $ voteMap s }
+  traceIO (show s)
+
+votingComplete :: KVTxnId -> ReaderT (MVar MasterState) IO Bool
+votingComplete tid = ask >>= \mvar -> liftIO $ do
+  s <- readMVar mvar
+  let v = fromJust $ Map.lookup tid (voteMap s)
+  return $ Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
+
+timedOut :: KVTxnId -> ReaderT (MVar MasterState) IO Bool
+timedOut tid = ask >>= \mvar -> liftIO $ do
+  s <- readMVar mvar
+  now <- Utils.currentTimeInt
+  let (ts, _) = fromJust $ Map.lookup tid (timeoutMap s) -- TODO: guarantee that a timeout value will exist  
+  return $ now - KVProtocol.kV_TIMEOUT >= ts
+
 sendResponse :: KVMessage -> ReaderT (MVar MasterState) IO ()
 sendResponse (KVVote _ _ VoteAbort _) = undefined
 
 sendResponse (KVVote tid sid VoteReady request) = do
-  mvar <- ask
-  s <- liftIO $ takeMVar mvar
-  let vm = voteMap s
-      s' = s { voteMap = Map.insert tid (Set.insert sid $ votes tid s) vm }
-
-  liftIO $ do
-    putMVar mvar s'
-    traceIO (show s)
-
-  now <- liftIO $ Utils.currentTimeInt
-  let (ts, _) = fromJust $ Map.lookup tid (timeoutMap s) -- TODO: guarantee that a timeout value will exist
-
-  if canCommit (votes tid s') s' then sendDecisionToRing (KVDecision tid DecisionCommit request) 
-  else if now - KVProtocol.kV_TIMEOUT >= ts
-       then sendDecisionToRing (KVDecision tid DecisionAbort request)
+  addVote tid sid
+  commit <- votingComplete tid
+  timeout <- timedOut tid
+  if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
+  else if timeout then sendDecisionToRing (KVDecision tid DecisionAbort request)
        else return ()
-
-  where canCommit v s = Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
-        votes txn_id s = fromJust $ Map.lookup txn_id (voteMap s)
-
 
 sendResponse kvMsg@(KVResponse tid sid _) = do
   mvar <- ask
