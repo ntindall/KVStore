@@ -45,7 +45,7 @@ data MasterState = MasterState {
                 , ackMap  :: Map.Map KVTxnId (Set.Set Int)
                   --timeout map. Map from transaction id to when the server first
                   --sent a KVRequest to a shard
-                , timeoutMap :: Map.Map KVTxnId Int
+                , timeoutMap :: Map.Map KVTxnId (Int, KVMessage)
                 }
 
 instance Show (MasterState) where
@@ -67,7 +67,30 @@ runKVMaster cfg = do
   c <- newChan
   mvar <- newMVar (MasterState s c cfg Map.empty Map.empty Map.empty)
   forkIO $ runReaderT processMessages mvar
+  forkIO $ runReaderT timeoutThread mvar
   runReaderT sendResponses mvar
+
+
+timeoutThread :: ReaderT (MVar MasterState) IO ()
+timeoutThread = do
+  mvar <- ask
+
+--  liftIO $ traceIO "Timing out! in timeout thread!"
+
+  state <- liftIO $ readMVar mvar
+  now <- liftIO $ Utils.currentTimeInt
+
+  let timeoutMap' = Map.toList $ timeoutMap state
+
+  mapM_ (\(txn_id,(ts,msg)) -> do
+          if (now - KVProtocol.kV_TIMEOUT >= ts)
+          then sendDecisionToRing (KVDecision txn_id DecisionAbort (request msg))
+          else liftIO $ return ()
+        ) timeoutMap'
+
+  liftIO $ threadDelay 10000000
+  timeoutThread
+
 
 sendResponse :: KVMessage -> ReaderT (MVar MasterState) IO ()
 sendResponse (KVVote _ _ VoteAbort request) = undefined
@@ -97,7 +120,7 @@ sendResponse (KVVote txn_id slave_id VoteReady request) = do
   else 
     case Map.lookup txn_id timeoutMap' of
       Nothing -> liftIO $ return ()
-      Just ts -> 
+      Just (ts,_) -> 
         if now - KVProtocol.kV_TIMEOUT >= ts
         then sendDecisionToRing (KVDecision txn_id DecisionAbort request)
         else
@@ -129,7 +152,7 @@ sendResponse kvMsg@(KVResponse txn_id slave_id _) = do
 
         putMVar mvar $ state { ackMap = newAckMap'} --MasterState (socket state) (cfg state) (voteMap state) newAckMap'
 
-sendResponse kvMsg@(KVRequest txn_id _) = do
+sendResponse kvMsg@(KVRequest txn_id req) = do
   mvar <- ask
   liftIO $ do 
 
@@ -137,7 +160,7 @@ sendResponse kvMsg@(KVRequest txn_id _) = do
     --timeout map
     state <- takeMVar mvar
     now <- Utils.currentTimeInt
-    let updatedTimeoutMap = Map.insert txn_id now (timeoutMap state)
+    let updatedTimeoutMap = Map.insert txn_id (now, kvMsg) (timeoutMap state)
     putMVar mvar $ state { timeoutMap = updatedTimeoutMap }
 
   sendMsgToRing kvMsg
@@ -165,9 +188,8 @@ sendResponse (KVAck txn_id (Just slave_id)) = do
   liftIO $ do
     state <- takeMVar mvar
 
-    let acks = ackMap state --should already exist in map TODO... bug?
-               -- if Map.member txn_id (ackMap state) then ackMap state else Map.insert txn_id Set.empty (ackMap state)
-        slvIds = fromJust $ Map.lookup txn_id acks -- ack map was added on decision send
+    let acks = if Map.member txn_id (ackMap state) then ackMap state else Map.insert txn_id Set.empty (ackMap state)
+        slvIds = fromJust $ Map.lookup txn_id acks
 
     if not (Set.member slave_id slvIds) && Set.size slvIds == Prelude.length (Lib.slaveConfig $ cfg state) - 1
     then do --the ACK we are processing is the last ack from the ring
@@ -218,7 +240,6 @@ forwardToNodeWithRetry (myId, hostName, portId) msg timeout = do
     --if there are no acks in the map, then all of the nodes in the ring have responded
     --if the set of acks contains the current slave id, then we can also stop resending,
     --as this node has responded
-  liftIO $ traceIO $ "hello"
   if (acks == Nothing || Set.member myId (fromJust acks)) then do
     liftIO $ putMVar mvar state
   else do
@@ -302,7 +323,7 @@ tryConnect name portId msg = do
         -- the connection time out, meaning that the transaction should be aborted.
         -- mark this in the timeout map so the timeout thread behaves appropriately.
         state <- takeMVar mvar
-        let updatedTimeoutMap = Map.insert (txn_id msg) 0 (timeoutMap state)
+        let updatedTimeoutMap = Map.insert (txn_id msg) (0,msg) (timeoutMap state)
         putMVar mvar $ state { timeoutMap = updatedTimeoutMap }
 
         return Nothing
