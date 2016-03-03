@@ -11,6 +11,7 @@ module KVProtocol
   , KVKey
   , KVVal
   , KVTxnId
+  , kV_TIMEOUT
   , getMessage
   , sendMessage
   , connectToMaster
@@ -100,6 +101,8 @@ instance Serialize KVResponse
 instance Serialize KVDecision
 instance Serialize KVVote
 
+kV_TIMEOUT :: Int
+kV_TIMEOUT = 1
 
 decodeMsg :: B.ByteString -> Either String KVMessage
 decodeMsg = CEREAL.decodeLazy

@@ -10,9 +10,7 @@ import qualified Utils
 import KVProtocol
 import System.IO as IO
 
-import Data.Time
 import Control.Applicative
-import Data.Time.Clock.POSIX
 import Data.List as List
 import Data.Set as Set
 
@@ -20,11 +18,9 @@ import Debug.Trace
 
 import Control.Monad
 
-type KeyValueMapWithState = Map.Map B.ByteString ((KVKey, KVVal, B.ByteString), Bool)
+import qualified Utils
 
---https://stackoverflow.com/questions/17909770/get-time-as-int
-currentTimeInt :: IO Int
-currentTimeInt = round `fmap` getPOSIXTime :: IO Int
+type KeyValueMapWithState = Map.Map B.ByteString ((KVKey, KVVal, B.ByteString), Bool)
 
 
 getSeparator :: B.ByteString
@@ -33,7 +29,7 @@ getSeparator = " " --todo, escaping?
 writeReady :: FilePath -> KVMessage -> IO()
 writeReady filename msg = do
   -- LOG READY, <timestamp, txn_id, key, newval>
-  time <- currentTimeInt
+  time <- Utils.currentTimeInt
   let field_txn = txn_id msg
       field_request = request msg
       key = putkey field_request
@@ -47,7 +43,7 @@ writeReady filename msg = do
 writeCommit :: FilePath -> KVMessage -> IO()
 writeCommit filename msg = do
   -- LOG COMMIT, <timestamp, txn_id>
-  time <- currentTimeInt
+  time <- Utils.currentTimeInt
   let field_txn = txn_id msg
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "COMMIT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
