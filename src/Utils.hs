@@ -5,7 +5,13 @@ import Data.ByteString.Lazy as B
 
 import Data.Time.Clock.POSIX
 
+import Network as NETWORK
+import Network.Socket as SOCKET
+import Network.BSD as BSD
+
+
 import Control.Arrow
+import Control.Exception
 
 writeKVList :: [(B.ByteString, B.ByteString)] -> B.ByteString
 writeKVList kvstore = C8.intercalate (C8.pack "\n") $ Prelude.map helper kvstore
@@ -18,3 +24,17 @@ readKVList = Prelude.map parseField . C8.lines
 --https://stackoverflow.com/questions/17909770/get-time-as-int
 currentTimeInt :: IO Int
 currentTimeInt = round `fmap` getPOSIXTime :: IO Int
+
+getFreeSocket :: IO Socket
+getFreeSocket = do
+  proto <- BSD.getProtocolNumber "tcp"
+  bracketOnError
+    (SOCKET.socket AF_INET Stream proto)
+    SOCKET.sClose
+    (\sock -> do
+        let port = aNY_PORT
+        SOCKET.setSocketOption sock ReuseAddr 1
+        SOCKET.bindSocket sock (SockAddrInet port iNADDR_ANY)
+        SOCKET.listen sock maxListenQueue
+        return sock
+    )
