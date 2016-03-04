@@ -1,6 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module ClientLib where
+module ClientLib
+    ( registerWithMaster
+    , putKey
+    , getKey
+    ) where
 
 import qualified Lib
 
@@ -38,13 +42,14 @@ type ClientId = Int
 
 data ClientState = ClientState {
                     skt :: Socket
+                  , cfg :: Lib.Config
                   , me :: (ClientId, HostName, PortID) 
                   , outstandingTxns :: Map.Map KVTxnId (MVar KVMessage)
                   , nextTid :: Int
                  }
 
 instance Show (ClientState) where
-  show (ClientState skt me _ nextTid) = show skt ++ show me ++ show nextTid 
+  show (ClientState skt cfg me _ nextTid) = show skt ++ show cfg ++ show me ++ show nextTid 
 
 --main :: IO ()
 --main = do
@@ -54,17 +59,17 @@ instance Show (ClientState) where
 --  return ()
 --  --todo, unregisted
 
+listen :: MVar ClientState -> IO()
+listen mvar = undefined
+
 registerWithMaster :: Lib.Config -> IO (MVar ClientState)
 registerWithMaster cfg = do
   --Allocate a socket on the client for communication with the master
   s <- Utils.getFreeSocket
-
   meData <- registerWithMaster_ cfg s
-
-  mvar <- newMVar $ ClientState s meData Map.empty 1
-
+  mvar <- newMVar $ ClientState s cfg meData Map.empty 1
+  --forkIO $ listen mvar
   return mvar
-
 
 --Send a registration message to the master with txn_id 0 and wait to receive
 --clientId back
@@ -104,12 +109,32 @@ putKey :: MVar ClientState
        -> KVKey
        -> KVVal
        -> IO(KVVal)
-putKey mvar _ _ = undefined
+putKey mvar k v = do
+  state <- takeMVar mvar
+  let tNo = nextTid state
+      (clientId,_, _) = me state
+      config = cfg state
+      tid = (clientId, tNo) 
+
+      request = KVRequest tid (PutReq k v)
+
+  myMvar <- newEmptyMVar
+  let outstandingTxns' = Map.insert tid myMvar (outstandingTxns state)
+
+  putMVar mvar $ state { nextTid = tNo + 1
+                       , outstandingTxns = outstandingTxns'}
+
+  h <- KVProtocol.connectToMaster config
+  KVProtocol.sendMessage h request
+  IO.hClose h
+
+  response <- takeMVar myMvar
+  return B.empty
 
 getKey :: MVar ClientState
        -> KVKey
        -> IO(KVVal)
-getKey _ _ = undefined
+getKey mvar k = undefined
 
 
 
