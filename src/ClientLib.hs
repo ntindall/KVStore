@@ -2,8 +2,9 @@
 
 module ClientLib
     ( registerWithMaster
-    , putKey
-    , getKey
+    , putVal
+    , getVal
+    , MasterHandle
     ) where
 
 import qualified Lib
@@ -14,18 +15,16 @@ import Control.Exception
 
 import Data.ByteString.Lazy as B
 import Data.ByteString.Lazy.Char8 as C8
-import Data.Char as Char
 import Data.Maybe
-import Data.Word as W
 import Data.Map.Strict as Map
 
-import System.Environment
 import System.IO as IO
-import System.IO.Unsafe as UNSAFEIO
+
 import Network as NETWORK
-import Network.Socket as SOCKET
+import Network.Socket as SOCKET hiding (listen)
 import Network.BSD as BSD
 
+import Control.Concurrent
 import Control.Concurrent.MVar
 
 -------------------------------------
@@ -40,6 +39,8 @@ import Debug.Trace
 
 type ClientId = Int
 
+type MasterHandle = MVar ClientState
+
 data ClientState = ClientState {
                     skt :: Socket
                   , cfg :: Lib.Config
@@ -51,24 +52,38 @@ data ClientState = ClientState {
 instance Show (ClientState) where
   show (ClientState skt cfg me _ nextTid) = show skt ++ show cfg ++ show me ++ show nextTid 
 
---main :: IO ()
---main = do
---  master <- registerWithMaster
---  getVal <- getKey master "Hello"
---  putVal <- putKey master "Hello" 3
---  return ()
---  --todo, unregisted
+listen :: MasterHandle -> IO()
+listen mvar = do
+  state <- readMVar mvar
+  (h, _, _) <- NETWORK.accept (skt state)
+  response <- KVProtocol.getMessage h
+  IO.hClose h
 
-listen :: MVar ClientState -> IO()
-listen mvar = undefined
+  either (\errmsg -> do
+          IO.putStr $ errmsg ++ "\n"
+          listen mvar
+         )
+         (\kvMsg -> do
+            let tid = txn_id kvMsg
+            state' <- readMVar mvar
+            let txnMVar = Map.lookup tid (outstandingTxns state')
 
-registerWithMaster :: Lib.Config -> IO (MVar ClientState)
+            --means that the message sent from the master was a duplicate (should not happen)
+            --could happen if code in master is irregular (should fix)
+            if isNothing txnMVar then listen mvar
+            --write into the mvar, waking the thread waiting to take the response!
+            else putMVar (fromJust txnMVar) kvMsg >>= \_ -> listen mvar
+          )
+         response
+  listen mvar
+
+registerWithMaster :: Lib.Config -> IO (MasterHandle)
 registerWithMaster cfg = do
   --Allocate a socket on the client for communication with the master
   s <- Utils.getFreeSocket
   meData <- registerWithMaster_ cfg s
   mvar <- newMVar $ ClientState s cfg meData Map.empty 1
-  --forkIO $ listen mvar
+  forkIO $ listen mvar
   return mvar
 
 --Send a registration message to the master with txn_id 0 and wait to receive
@@ -105,20 +120,17 @@ registerWithMaster_ cfg s = do
                  )
                  response
 
-putKey :: MVar ClientState
-       -> KVKey
-       -> KVVal
-       -> IO(KVVal)
-putKey mvar k v = do
+sendRequestAndWaitForResponse :: MVar ClientState -> KVRequest -> IO(KVVal)
+sendRequestAndWaitForResponse mvar req = do
+  myMvar <- newEmptyMVar
   state <- takeMVar mvar
   let tNo = nextTid state
       (clientId,_, _) = me state
       config = cfg state
       tid = (clientId, tNo) 
 
-      request = KVRequest tid (PutReq k v)
+      request = KVRequest tid req
 
-  myMvar <- newEmptyMVar
   let outstandingTxns' = Map.insert tid myMvar (outstandingTxns state)
 
   putMVar mvar $ state { nextTid = tNo + 1
@@ -129,129 +141,21 @@ putKey mvar k v = do
   IO.hClose h
 
   response <- takeMVar myMvar
+
+  state' <- takeMVar mvar
+  let outstandingTxns'' = Map.delete tid (outstandingTxns state')
+  putMVar mvar $ state' { outstandingTxns = outstandingTxns''}
+
   return B.empty
 
-getKey :: MVar ClientState
+putVal :: MVar ClientState
+       -> KVKey
+       -> KVVal
+       -> IO(KVVal)
+putVal mvar k v = sendRequestAndWaitForResponse mvar (PutReq k v)
+
+
+getVal :: MVar ClientState
        -> KVKey
        -> IO(KVVal)
-getKey mvar k = undefined
-
-
-
-
---runKVClient :: Lib.Config -> IO ()
---runKVClient cfg = do
---  -- cfg' <- registerWithMaster cfg
---  -- let cfg' = cfg
---  s <- getFreeSocket --listenOn (snd clientCfg) --todo, make this dynamic
---  hostName <- BSD.getHostName
---  portId <- NETWORK.socketPort s
-
---  let cfg' = cfg { Lib.clientConfig = [(hostName, portId)]}
-
---  (a, s) <- runStateT registerWithMaster (ClientState s cfg' 0)
---  traceIO $ show (a,s)
---  evalStateT issueRequests s
-
---registerWithMaster :: StateT ClientState IO ()
---registerWithMaster = do
---  state <- get
---  let config = cfg state
---  let clientCfg = Prelude.head $ Lib.clientConfig config
---      hostname = fst clientCfg
---      portId = case snd clientCfg of
---                  (PortNumber n) -> fromEnum n
---                  _ -> undefined -- TODO extremely hacky
---      txn_id = next_txn_id state
-
---  h <- liftIO $ KVProtocol.connectToMaster config
---  liftIO $ KVProtocol.sendMessage h (KVRegistration (0, txn_id) hostname portId)
-
---  waitForFirstAck -- wait for the Master to respond with the initial ack, and
---                  -- update the config to self identify with the clientId
-
---  where waitForFirstAck = do
---          state <- get
---          let txn_id = next_txn_id state
---          (h', _, _) <- liftIO $ NETWORK.accept (skt state)
---          response <- liftIO $ KVProtocol.getMessage h'
-
---          either (\errmsg -> do
---                  liftIO $ IO.putStr $ errmsg ++ "\n"
---                  liftIO $ IO.hClose h'
---                  waitForFirstAck
---                 )
---                 (\kvMsg -> do
---                    case kvMsg of
---                      (KVAck (clientId, txn_id) _) -> do
---                        let config' = (cfg state) { Lib.clientNumber = Just clientId}
---                        let state' = state { cfg = config', next_txn_id = txn_id + 1 }
-
---                        put state'
---                      _ -> do
---                        liftIO $ IO.hClose h'
---                        waitForFirstAck --todo, error handling
---                 )
---                 response
-
---parseInput :: B.ByteString -> StateT ClientState IO(Maybe KVMessage)
---parseInput text = do
---  state <- get
---  let clientId = fromJust $ Lib.clientNumber (cfg state)
---      txn_id = next_txn_id state
---      pieces = C8.split ' ' text
---  if Prelude.length pieces > 1
---  then let reqType = Prelude.head pieces
---           key = pieces !! 1
---           val | Prelude.length pieces >= 3 = pieces !! 2
---               | otherwise = B.empty
-
---           in if reqType == "PUT" || reqType == "put"
---              then return $ Just (KVRequest (clientId, txn_id) (PutReq key val))
---              else return $ Just (KVRequest (clientId, txn_id) (GetReq key))
---  else return Nothing
-
-
---issueRequests :: StateT ClientState IO ()
---issueRequests = do
---  state <- get
---  let config = cfg state
---      txn_id = next_txn_id state
---      s = skt state
-
---  text <- liftIO IO.getLine
---  request <- parseInput (C8.pack text)
---  if isNothing request
---  then issueRequests
---  else do
---    liftIO (do
---      let request' = fromJust request
---      h <- KVProtocol.connectToMaster config
-
---      KVProtocol.sendMessage h request'
-
---      IO.hClose h
-
---      (h', hostName, portNumber) <- NETWORK.accept s
---      msg <- KVProtocol.getMessage h'
-
---      IO.hClose h'
---      )
---    put $ state { next_txn_id = txn_id + 1 }
---    issueRequests
-
-
----- makeRequest :: IO (KVMessage)
----- makeRequest = do
-----   rstr1 <- randomString
-----   rstr2 <- randomString
-----   return $ KVRequest (0,1) (PutReq rstr1 rstr2)
-
---------------------------------------
-----for now
-
-----https://stackoverflow.com/questions/17500194/generate-a-random-string-at-compile-time-or-run-time-and-use-it-in-the-rest-of-t
----- randomString :: IO B.ByteString
----- randomString = do
-----   let string = Prelude.take 10 $ randomRs ('a','z') $ UNSAFEIO.unsafePerformIO newStdGen
-----   return $ C8.pack string
+getVal mvar k = sendRequestAndWaitForResponse mvar (GetReq k)
