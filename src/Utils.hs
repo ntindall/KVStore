@@ -3,6 +3,9 @@ module Utils where
 import Data.ByteString.Lazy.Char8 as C8
 import Data.ByteString.Lazy as B
 
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+
 import Data.Time.Clock.POSIX
 
 import Control.Arrow
@@ -18,3 +21,11 @@ readKVList = Prelude.map parseField . C8.lines
 --https://stackoverflow.com/questions/17909770/get-time-as-int
 currentTimeInt :: IO Int
 currentTimeInt = round `fmap` getPOSIXTime :: IO Int
+
+insertM :: Ord a => a -> b -> Maybe (Map.Map a b) -> Map.Map a b
+insertM k v (Just m) = Map.insert k v m
+insertM k v Nothing = Map.singleton k v
+
+insertS :: Ord a => a -> Maybe (Set.Set a) -> Set.Set a
+insertS v (Just s) = Set.insert v s
+insertS v Nothing = Set.singleton v

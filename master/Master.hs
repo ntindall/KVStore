@@ -26,7 +26,7 @@ import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
 
 import Debug.Trace
 
-import qualified Utils
+import qualified Utils as U
 
 --https://hackage.haskell.org/package/lrucache-1.2.0.0/docs/Data-Cache-LRU.html
 data MasterState = MasterState {
@@ -85,7 +85,7 @@ timeoutThread = do
 --  liftIO $ traceIO "Timing out! in timeout thread!"
 
   state <- liftIO $ readMVar mvar
-  now <- liftIO $ Utils.currentTimeInt
+  now <- liftIO $ U.currentTimeInt
 
   let timeoutMap' = Map.toList $ timeoutMap state
 
@@ -101,7 +101,7 @@ timeoutThread = do
 addVote :: KVTxnId -> Int -> ReaderT (MVar MasterState) IO ()
 addVote tid sid = ask >>= \mvar -> liftIO $ do
   s <- takeMVar mvar
-  liftIO $ traceIO $ "adding vote to" ++ show tid
+  traceIO $ "adding vote to" ++ show tid
   let v = fromJust $ Map.lookup tid (voteMap s)
   putMVar mvar $ s { voteMap = Map.insert tid (Set.insert sid v) $ voteMap s }
   traceIO (show s)
@@ -110,16 +110,28 @@ votingComplete :: KVTxnId -> ReaderT (MVar MasterState) IO Bool
 votingComplete tid = ask >>= \mvar -> liftIO $ do
   s <- readMVar mvar
   traceIO (show s)
-  liftIO $ traceIO $ "voting complete"
+  traceIO $ "voting complete"
   let v = fromJust $ Map.lookup tid (voteMap s)
   return $ Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
 
 timedOut :: KVTxnId -> ReaderT (MVar MasterState) IO Bool
 timedOut tid = ask >>= \mvar -> liftIO $ do
   s <- readMVar mvar
-  now <- Utils.currentTimeInt
+  now <- U.currentTimeInt
   let (ts, _) = fromJust $ Map.lookup tid (timeoutMap s)
   return $ now - KVProtocol.kV_TIMEOUT >= ts
+
+addAck :: KVTxnId -> Int -> ReaderT (MVar MasterState) IO ()
+addAck tid sid = ask >>= \mvar -> liftIO $ do
+  s <- takeMVar mvar
+  traceIO $ "adding ack to" ++ show tid ++ " for slave " ++ show sid
+  -- use ackMap to keep track of which transactions on the GET pathway have been
+  -- forwarded to the client
+  let acks = U.insertS sid $ Map.lookup tid $ ackMap s  
+  let m = if Set.size acks == (Prelude.length $ slaveConfig $ cfg s)
+          then Map.delete tid $ ackMap s   -- erase this txn from map - all the slaves have sent a response to master
+          else Map.insert tid acks $ ackMap s
+  putMVar mvar $ s { ackMap = m }
 
 sendResponse :: KVMessage -> ReaderT (MVar MasterState) IO ()
 sendResponse (KVVote _ _ VoteAbort _) = undefined
@@ -132,29 +144,7 @@ sendResponse (KVVote tid sid VoteReady request) = do
   else if timeout then sendDecisionToRing (KVDecision tid DecisionAbort request)
        else return ()
 
-sendResponse kvMsg@(KVResponse tid sid _) = ask >>= \mvar -> liftIO $ do
-  state <- takeMVar mvar
-  -- use ackMap to keep track of which transactions on the GET pathway have been
-  -- forwarded to the client
-  let oldAckMap = ackMap state
-
-  case Map.lookup tid oldAckMap of
-    Nothing -> do
-      let newAckMap = Map.insert tid (Set.singleton sid) oldAckMap
-
-      putMVar mvar $ state {ackMap = newAckMap} --MasterState (socket state) (cfg state) (voteMap state) newAckMap
-
-      sendMsgToClient kvMsg (cfg state)
-
-    Just hasRespondedSet  -> do
-      let hasRespondedSet' = Set.insert sid hasRespondedSet
-          newAckMap' = if Set.size hasRespondedSet' == (Prelude.length $ slaveConfig $ cfg state)
-                       --erase this txn from the ack map, all the slaves have
-                       --sent a response to master
-                       then Map.delete tid oldAckMap
-                       else Map.insert tid hasRespondedSet' oldAckMap
-
-      putMVar mvar $ state { ackMap = newAckMap'} --MasterState (socket state) (cfg state) (voteMap state) newAckMap'
+sendResponse kvMsg@(KVResponse tid sid _) = addAck tid sid
 
 sendResponse kvMsg@(KVRequest txn_id req) = ask >>= \mvar -> do
   liftIO $ do 
@@ -162,7 +152,7 @@ sendResponse kvMsg@(KVRequest txn_id req) = ask >>= \mvar -> do
     --Communicating with shard for the first time, keep track of this in the
     --timeout map.
     state <- takeMVar mvar
-    now <- Utils.currentTimeInt
+    now <- U.currentTimeInt
     let updatedTimeoutMap = Map.insert txn_id (now, kvMsg) (timeoutMap state)
         updatedVoteMap    = Map.insert txn_id Set.empty (voteMap state)
     putMVar mvar $ state { timeoutMap = updatedTimeoutMap,

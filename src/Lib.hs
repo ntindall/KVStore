@@ -78,6 +78,8 @@ allocSlaves False _ = undefined --not implemented yet
 
 ---------------- HELPER FUNCTIONS -------------------
 
+-- TODO: Move to utils
+
 fst' :: (a,b,c) -> a
 fst' (a,_,_) = a
 
@@ -86,3 +88,4 @@ snd' (_,b,_) = b
 
 thrd :: (a,b,c) -> c
 thrd (_,_,c) = c
+
