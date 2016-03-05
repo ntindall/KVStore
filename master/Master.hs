@@ -64,7 +64,66 @@ runKVMaster (Just c) = do
   mvar <- newMVar (s c Map.empty Map.empty Map.empty)
   _ <- forkIO $ runReaderT listen mvar
   _ <- forkIO $ runReaderT timeoutThread mvar
-  runReaderT processMessages mvar
+  processMessages mvar
+
+processMessages :: MVar MasterState -> IO ()
+processMessages mvar = do
+  state <- readMVar mvar
+  message <- readChan (channel state)
+  _ <- forkIO $ runReaderT (processMessage message) mvar
+  processMessages mvar
+
+processMessage :: KVMessage -> ReaderT (MVar MasterState) IO ()
+processMessage (KVVote _ _ VoteAbort _) = undefined
+
+processMessage (KVVote tid sid VoteReady request) = do
+  addVote tid sid
+  commit <- votingComplete tid
+  timeout <- timedOut tid
+  if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
+  else if timeout then sendDecisionToRing (KVDecision tid DecisionAbort request)
+       else return ()
+
+processMessage kvMsg@(KVResponse tid sid _) = addAck tid sid
+
+processMessage kvMsg@(KVRequest txn_id req) = ask >>= \mvar -> do
+  liftIO $ do 
+    --Communicating with shard for the first time, keep track of this in the
+    --timeout map.
+    state <- takeMVar mvar
+    now <- U.currentTimeInt
+    let tm = Map.insert txn_id (now, kvMsg) (timeoutMap state)
+        vm = Map.insert txn_id Set.empty (voteMap state)
+    putMVar mvar $ state { timeoutMap = tm, voteMap = vm }
+
+  sendMsgToRing kvMsg
+
+processMessage (KVAck tid (Just sid)) = ask >>= \mvar -> do
+  addAck tid sid
+  complete <- ackComplete tid
+  if complete then do
+    clearTX tid
+    sendMsgToClient $ KVAck tid Nothing
+  else return ()
+
+processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
+  mvar <- ask
+  liftIO $ do
+    state <- takeMVar mvar
+    let oldConfig = cfg state
+        oldClientCfg = Lib.clientConfig oldConfig
+        cfgTuple = (hostName, PortNumber $ toEnum portId)
+        newClientCfg = oldClientCfg ++ [cfgTuple]
+        newConfig = oldConfig { clientConfig = newClientCfg }
+        clientId = Prelude.length newClientCfg - 1
+
+    putMVar mvar $ state {cfg = newConfig} 
+
+    clientH <- liftIO $ uncurry connectTo cfgTuple
+    liftIO $ KVProtocol.sendMessage clientH $ KVAck (clientId, snd txn_id) $ Just clientId
+    liftIO $ hClose clientH
+
+processMessage _ = undefined
 
 -- Listen and write to thread-safe channel
 listen :: ReaderT (MVar MasterState) IO ()
@@ -149,65 +208,6 @@ clearTX tid = ask >>= \mvar -> liftIO $ do
                      voteMap = Map.delete tid $ voteMap s,
                      timeoutMap = Map.delete tid $ timeoutMap s }
 
-processMessage :: KVMessage -> ReaderT (MVar MasterState) IO ()
-processMessage (KVVote _ _ VoteAbort _) = undefined
-
-processMessage (KVVote tid sid VoteReady request) = do
-  addVote tid sid
-  commit <- votingComplete tid
-  timeout <- timedOut tid
-  if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
-  else if timeout then sendDecisionToRing (KVDecision tid DecisionAbort request)
-       else return ()
-
-processMessage kvMsg@(KVResponse tid sid _) = addAck tid sid
-
-processMessage kvMsg@(KVRequest txn_id req) = ask >>= \mvar -> do
-  liftIO $ do 
-    --Communicating with shard for the first time, keep track of this in the
-    --timeout map.
-    state <- takeMVar mvar
-    now <- U.currentTimeInt
-    let tm = Map.insert txn_id (now, kvMsg) (timeoutMap state)
-        vm = Map.insert txn_id Set.empty (voteMap state)
-    putMVar mvar $ state { timeoutMap = tm, voteMap = vm }
-
-  sendMsgToRing kvMsg
-
-processMessage (KVAck tid (Just sid)) = ask >>= \mvar -> do
-  addAck tid sid
-  complete <- ackComplete tid
-  if complete then do
-    clearTX tid
-    sendMsgToClient $ KVAck tid Nothing
-  else return ()
-
-processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
-  mvar <- ask
-  liftIO $ do
-    state <- takeMVar mvar
-    let oldConfig = cfg state
-        oldClientCfg = Lib.clientConfig oldConfig
-        cfgTuple = (hostName, PortNumber $ toEnum portId)
-        newClientCfg = oldClientCfg ++ [cfgTuple]
-        newConfig = oldConfig { clientConfig = newClientCfg }
-        clientId = Prelude.length newClientCfg - 1
-
-    putMVar mvar $ state {cfg = newConfig} 
-
-    clientH <- liftIO $ uncurry connectTo cfgTuple
-    liftIO $ KVProtocol.sendMessage clientH $ KVAck (clientId, snd txn_id) $ Just clientId
-    liftIO $ hClose clientH
-
-processMessage _ = undefined
-
-processMessages :: ReaderT (MVar MasterState) IO ()
-processMessages = ask >>= \mvar -> do
-  liftIO $ do
-    state <- readMVar mvar
-    message <- readChan (channel state)
-    forkIO $ runReaderT (processMessage message) mvar
-  processMessages
 
 sendDecisionToRing :: KVMessage -> ReaderT (MVar MasterState) IO ()
 sendDecisionToRing msg@(KVDecision txn_id decision req) = do
