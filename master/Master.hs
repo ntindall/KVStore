@@ -66,10 +66,22 @@ runKVMaster (Just c) = do
   _ <- forkIO $ runReaderT timeoutThread mvar
   processMessages mvar
 
+-- Listen and write to thread-safe channel
+listen :: ReaderT (MVar MasterState) IO ()
+listen = ask >>= \mvar -> do
+  liftIO $ do
+    s <- readMVar mvar
+    let process = either (IO.putStr . show . (++ "\n")) (writeChan $ channel s)
+    Catch.bracket
+      (accept $ socket s) 
+      (hClose . Lib.fst')
+      ((>>= process) . KVProtocol.getMessage . Lib.fst')
+  listen
+
 processMessages :: MVar MasterState -> IO ()
 processMessages mvar = do
-  state <- readMVar mvar
-  message <- readChan (channel state)
+  s <- readMVar mvar
+  message <- readChan $ channel s
   _ <- forkIO $ runReaderT (processMessage message) mvar
   processMessages mvar
 
@@ -84,7 +96,17 @@ processMessage (KVVote tid sid VoteReady request) = do
   else if timeout then sendDecisionToRing (KVDecision tid DecisionAbort request)
        else return ()
 
-processMessage kvMsg@(KVResponse tid sid _) = addAck tid sid
+processMessage kvMsg@(KVResponse tid sid _) = do
+  addAck tid sid
+  complete <- ackComplete tid
+  if complete then do
+    sendMsgToClient kvMsg
+    clearTX tid
+  else return ()
+  -- TODO: add tiemout for get reqs
+  -- addAck tid sid
+  -- complete <- ackComplete tid
+  -- if complete then clearAcksTX tid else return ()
 
 processMessage kvMsg@(KVRequest txn_id req) = ask >>= \mvar -> do
   liftIO $ do 
@@ -93,12 +115,13 @@ processMessage kvMsg@(KVRequest txn_id req) = ask >>= \mvar -> do
     state <- takeMVar mvar
     now <- U.currentTimeInt
     let tm = Map.insert txn_id (now, kvMsg) (timeoutMap state)
+        am = Map.insert txn_id Set.empty (ackMap state)
         vm = Map.insert txn_id Set.empty (voteMap state)
-    putMVar mvar $ state { timeoutMap = tm, voteMap = vm }
+    putMVar mvar $ state { ackMap = am, timeoutMap = tm, voteMap = vm }
 
   sendMsgToRing kvMsg
 
-processMessage (KVAck tid (Just sid)) = ask >>= \mvar -> do
+processMessage (KVAck tid (Just sid)) = do
   addAck tid sid
   complete <- ackComplete tid
   if complete then do
@@ -124,18 +147,6 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
     liftIO $ hClose clientH
 
 processMessage _ = undefined
-
--- Listen and write to thread-safe channel
-listen :: ReaderT (MVar MasterState) IO ()
-listen = ask >>= \mvar -> do
-  liftIO $ do
-    s <- readMVar mvar
-    let process = either (IO.putStr . show . (++ "\n")) (writeChan (channel s))
-    Catch.bracket
-      (accept (socket s)) 
-      (hClose . Lib.fst')
-      ( (>>= process) . KVProtocol.getMessage . Lib.fst')
-  listen
 
 timeoutThread :: ReaderT (MVar MasterState) IO ()
 timeoutThread = do
@@ -186,18 +197,21 @@ addAck tid sid = ask >>= \mvar -> liftIO $ do
   traceIO $ "adding ack to" ++ show tid ++ " for slave " ++ show sid
   -- use ackMap to keep track of which transactions on the GET pathway have been
   -- forwarded to the client
-  let acks = U.insertS sid $ Map.lookup tid $ ackMap s  
-  let m = if Set.size acks == (Prelude.length $ slaveConfig $ cfg s)
-          then Map.delete tid $ ackMap s   -- erase this txn from map - all the slaves have sent a response to master
-          else Map.insert tid acks $ ackMap s
-  putMVar mvar $ s { ackMap = m }
+  let acks = U.insertS sid $ Map.lookup tid $ ackMap s
+  putMVar mvar $ s { ackMap = Map.insert tid acks $ ackMap s }
+
+clearAcksTX :: KVTxnId -> ReaderT (MVar MasterState) IO ()
+clearAcksTX tid = ask >>= \mvar -> liftIO $ do
+  s <- takeMVar mvar               
+  putMVar mvar $ s { ackMap = Map.delete tid $ ackMap s }
 
 -- TODO: change these maps to map to tuples so that we can keep track of whether they are 'complete'
 ackComplete :: KVTxnId -> ReaderT (MVar MasterState) IO Bool
 ackComplete tid = ask >>= \mvar -> liftIO $ do
  s <- readMVar mvar
  traceIO (show s)
- traceIO $ "voting complete"
+ traceIO $ "ack complete"
+ traceIO (show $ ackMap s)
  let v = fromJust $ Map.lookup tid $ ackMap s
  return $ Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
 
@@ -207,7 +221,7 @@ clearTX tid = ask >>= \mvar -> liftIO $ do
   putMVar mvar $ s { ackMap = Map.delete tid $ ackMap s, 
                      voteMap = Map.delete tid $ voteMap s,
                      timeoutMap = Map.delete tid $ timeoutMap s }
-
+  traceIO $ "cleared txid" ++ show tid
 
 sendDecisionToRing :: KVMessage -> ReaderT (MVar MasterState) IO ()
 sendDecisionToRing msg@(KVDecision txn_id decision req) = do

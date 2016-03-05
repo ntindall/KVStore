@@ -102,7 +102,7 @@ instance Serialize KVDecision
 instance Serialize KVVote
 
 kV_TIMEOUT :: Int
-kV_TIMEOUT = 1
+kV_TIMEOUT = 10
 
 decodeMsg :: B.ByteString -> Either String KVMessage
 decodeMsg = CEREAL.decodeLazy
