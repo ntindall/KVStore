@@ -47,6 +47,7 @@ executable kvstore-slave
   build-depends:       base
                      , kvstore
                      , mtl
+                     , mstate
                      , network
                      , bytestring
                      , exceptions
