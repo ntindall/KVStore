@@ -83,7 +83,8 @@ data KVMessage = KVRegistration {
                 }
                | KVAck {
                   txn_id   :: KVTxnId --final message, sent by slave
-                , ack_id :: Maybe Int --either the slaveId (if sent FROM slave), or Nothing
+                , ack_id   :: Maybe Int --either the slaveId (if sent FROM slave), or Nothing
+                , success  :: Maybe B.ByteString
                }
                | KVVote {
                   txn_id   :: KVTxnId -- READY or ABORT, sent by slave

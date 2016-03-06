@@ -223,7 +223,7 @@ handleDecision msg = do
     --TODO!!! ! ! ! 
 
     h <- KVProtocol.connectToMaster config
-    KVProtocol.sendMessage h (KVAck field_txn (Just mySlaveId))
+    KVProtocol.sendMessage h (KVAck field_txn (Just mySlaveId) Nothing)
     IO.hClose h
 
 handleResponse = undefined

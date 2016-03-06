@@ -1,3 +1,0 @@
-hello=16
-lowercase=UPPERCASE
-xyz=zzz

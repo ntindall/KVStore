@@ -113,7 +113,7 @@ registerWithMaster_ cfg s = do
                  )
                  (\kvMsg -> do
                     case kvMsg of
-                      (KVAck (clientId, txn_id) _) -> return clientId
+                      (KVAck (clientId, txn_id) _ _ ) -> return clientId
                       _ -> do
                         IO.hClose h'
                         waitForFirstAck --todo, error handling
