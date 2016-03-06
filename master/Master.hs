@@ -102,6 +102,7 @@ processMessages = get >>= \s -> do
 
 processMessage :: KVMessage -> MState MasterState IO ()
 processMessage (KVVote _ _ VoteAbort _) = undefined
+--TODO, when receive an abort send an abort to everyone.
 
 processMessage (KVVote tid sid VoteReady request) = do
   addToState tid sid voteMap setVoteMap
@@ -129,12 +130,12 @@ processMessage kvMsg@(KVRequest txn_id req) = do
   modifyM_ $ \s -> s { timeoutMap = Map.insert txn_id (now, kvMsg) (timeoutMap s) }
   sendMsgToRing kvMsg
 
-processMessage (KVAck tid (Just sid)) = do
+processMessage (KVAck tid (Just sid) maybeSuccess) = do
   addToState tid sid ackMap $ \a s -> s { ackMap = a }
   complete <- isComplete tid ackMap
   when complete $ do
     clearTX tid
-    sendMsgToClient $ KVAck tid Nothing
+    sendMsgToClient $ KVAck tid Nothing maybeSuccess
 
 processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
   let cfgTuple = (hostName, PortNumber $ toEnum portId)
@@ -147,7 +148,7 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
 
   modifyM_ $ \s -> do s { cfg = newConfig }
   clientH <- liftIO $ uncurry connectTo cfgTuple
-  liftIO $ KVProtocol.sendMessage clientH $ KVAck (clientId, snd txn_id) $ Just clientId
+  liftIO $ KVProtocol.sendMessage clientH $ KVAck (clientId, snd txn_id) (Just clientId) Nothing
   liftIO $ hClose clientH
 
 processMessage _ = undefined

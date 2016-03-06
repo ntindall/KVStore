@@ -16,4 +16,5 @@ cabal.sandbox.config
 .stack-work/
 
 # related to kvstore
-#database/ #uncomment this when we have a ton of files
+database/** #uncomment this when we have a ton of files
+database/
