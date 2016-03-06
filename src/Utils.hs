@@ -15,13 +15,19 @@ import Network.BSD as BSD
 import Control.Arrow
 import Control.Exception
 
-writeKVList :: [(B.ByteString, B.ByteString)] -> B.ByteString
-writeKVList kvstore = C8.intercalate (C8.pack "\n") $ Prelude.map helper kvstore
-  where helper (k,v) = C8.concat [k, C8.pack "=", v]
+import KVProtocol
 
-readKVList :: B.ByteString -> [(B.ByteString, B.ByteString)]
+writeKVList :: [(KVKey, (KVVal, Int))] -> B.ByteString
+writeKVList kvstore = C8.intercalate (C8.pack "\n") $ Prelude.map helper kvstore
+  where helper (k,(v,ts)) = C8.concat [C8.pack (show ts), C8.pack ":", k, C8.pack "=", v]
+
+readKVList :: B.ByteString -> [(KVKey, (KVVal, Int))]
 readKVList = Prelude.map parseField . C8.lines
-  where parseField = second (C8.drop 1) . C8.break (== '=')
+  where parseField line =
+          let (ts, kv) = C8.break (== ':') line
+              ts_int = read (C8.unpack ts) :: Int
+              (k, v) = C8.break (== '=') (C8.drop 1 kv)
+          in (k, (C8.drop 1 v, ts_int))
 
 --https://stackoverflow.com/questions/17909770/get-time-as-int
 currentTimeInt :: IO Int

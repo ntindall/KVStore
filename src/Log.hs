@@ -13,6 +13,8 @@ import System.IO as IO
 import Control.Applicative
 import Data.List as List
 import Data.Set as Set
+import Data.Tuple.Utils
+import Data.Maybe
 
 import Debug.Trace
 
@@ -51,9 +53,20 @@ writeCommit filename msg = do
 
   B.appendFile filename logEntry
 
+writeAbort :: FilePath -> KVMessage -> IO()
+writeAbort filename msg = do
+  -- LOG ABORT, <timestamp, txn_id>
+  time <- Utils.currentTimeInt
+  let field_txn = txn_id msg
+      sep = getSeparator
+      logEntry = (C8.intercalate sep [C8.pack "ABORT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
+
+  B.appendFile filename logEntry
+
+
 --rebuild the in memory store using the log, redoing all committed actions that
 --occured after a checkpoint
-rebuild :: FilePath -> Map.Map B.ByteString B.ByteString -> IO (Map.Map KVTxnId KVMessage, Map.Map KVKey KVVal)
+rebuild :: FilePath -> Map.Map KVKey (KVVal, Int) -> IO (Map.Map KVTxnId KVMessage, Map.Map KVKey (KVVal, Int))
 rebuild logPath oldStore = do
 
   file <- B.readFile logPath
@@ -72,8 +85,8 @@ rebuild logPath oldStore = do
 
 handleLines :: [B.ByteString]                      --each line in the file
             -> Map.Map B.ByteString (KVKey, KVVal, B.ByteString) --unmatched ready map accumulator
-            -> Map.Map KVKey KVVal                 --store accumulator
-            -> IO(Map.Map B.ByteString (KVKey, KVVal, B.ByteString), Map.Map KVKey KVVal)
+            -> Map.Map KVKey (KVVal, Int)               --store accumulator
+            -> IO(Map.Map B.ByteString (KVKey, KVVal, B.ByteString), Map.Map KVKey (KVVal, Int))
 handleLines [] unmatchedReadyMap storeMap = return (unmatchedReadyMap, storeMap)
 handleLines (x:xs) unmatchedReadyMap storeMap 
   | C8.null x = handleLines xs unmatchedReadyMap storeMap
@@ -91,69 +104,33 @@ handleLines (x:xs) unmatchedReadyMap storeMap
             ts  = pieces !! 4
             unmatchedReadyMap' = Map.insert txn_id (key, val, ts) unmatchedReadyMap
         handleLines xs unmatchedReadyMap' storeMap
-      "COMMIT" -> do
+      "COMMIT" -> 
         case Map.lookup txn_id unmatchedReadyMap of
-          (Just (k,v,_)) ->
-            handleLines xs (Map.delete txn_id unmatchedReadyMap) 
-                           (Map.insert k v storeMap)
+          (Just (k,v,ts)) -> do
+            let oldVal = Map.lookup k storeMap
+                ts_int = read (C8.unpack ts) :: Int
+            
+            if isNothing oldVal || snd (fromJust oldVal) <= ts_int
+            then handleLines xs (Map.delete txn_id unmatchedReadyMap) 
+                                (Map.insert k (v, ts_int) storeMap)
+            else handleLines xs (Map.delete txn_id unmatchedReadyMap) 
+                                storeMap
           Nothing -> do
-            IO.putStr $ "Error, corrupted logfile... unexpected COMMIT with no preceeding READY"
-            return (Map.empty, Map.empty) -- todo, exception?
+            --TODO :: DO WE WANT TO HANDLE THIS QUIETLY???? 
+              IO.putStr $ "Error, corrupted logfile... unexpected COMMIT with no preceeding READY"
+              return (Map.empty, Map.empty) -- todo, exception?storeMap --allow duplicate commits and ABORTS
 
-
-
-
-
---handleLines :: [B.ByteString]                                    
---            -> KeyValueMapWithState                 -- map from txn_id to ((KVKey, KVVal, Timestamp), bool) tuples, where bool is true
---                                                    -- if the value should actually be writen to the store, and false if only
---                                                    -- an ACK need to be sent back.
---            -> Map.Map B.ByteString B.ByteString 
---            -> IO (KeyValueMapWithState, Map.Map KVKey KVVal)
---handleLines [] unmatchedReadyMap storeMap = return (unmatchedReadyMap, storeMap)
---handleLines (x:xs) unmatchedReadyMap storeMap 
---  | C8.null x = handleLines xs unmatchedReadyMap storeMap
---  | C8.length x < 3 = do
---    IO.putStr $ "Error, corrupted logfile..."
---    return (Map.empty, Map.empty) --todo.... exception?
---  | otherwise = do
---    let pieces = C8.split ' ' x
---        action = pieces !! 0
---        txn_id = pieces !! 1
---    case action of
---      "READY"  -> do
---        let key = pieces !! 2
---            val = pieces !! 3
---            ts  = pieces !! 4
---            unmatchedReadyMap' = Map.insert txn_id ((key, val, ts), True) unmatchedReadyMap
---        handleLines xs unmatchedReadyMap' storeMap
---      "COMMIT" -> do
---        let ts = pieces !! 2
---        case Map.lookup txn_id unmatchedReadyMap of
---          (Just ((k,v,_), _)) -> do
---            let storeMap' = Map.insert k v storeMap
---                unmatchedReadyMap' = 
---                  -- If there exists a Ready with a timestamp less than the current transaction's timestamp, which has
---                  -- a ready any a commit, we set the bool value associated with that txn id in the readyMap to be false,
---                  -- indicating that the txn_id should not be inserted into the store, but must be ACKed.
---                  Map.mapWithKey (\txn_id ((k', v', ts'), b') ->
---                    if k == k' && ts' < ts 
---                    then ((k',v',ts'), False)
---                    else ((k',v',ts'), b')
---                  ) unmatchedReadyMap
---            handleLines xs (Map.delete txn_id unmatchedReadyMap') storeMap'
---          Nothing -> do
---            IO.putStr $ "Error, corrupted logfile... unexpected COMMIT with no preceeding READY"
---            return (Map.empty, Map.empty) -- todo, exception?
-
+      "ABORT" -> do
+        -- delete the transaction id from the unmatched readyMap
+        handleLines xs (Map.delete txn_id unmatchedReadyMap) storeMap
 
 --todo, auto touch files if they are not there
 persistentLogName :: Int -> String                                                   --todo, hacky
 persistentLogName slaveId = "database/logs/log_kvstore_" ++ show slaveId ++ ".txt"
 
-updateKVStore :: FilePath -> B.ByteString -> B.ByteString -> IO ()
-updateKVStore filePath key val = do
-  kvMap <- liftM Utils.readKVList $ B.readFile filePath
-  let updatedKvMap = Map.insert key val (Map.fromList kvMap)
-  traceIO $ show updatedKvMap
-  B.writeFile filePath (Utils.writeKVList $ Map.toList updatedKvMap)
+--updateKVStore :: FilePath -> B.ByteString -> B.ByteString -> IO ()
+--updateKVStore filePath key val = do
+--  kvMap <- liftM Utils.readKVList $ B.readFile filePath
+--  let updatedKvMap = Map.insert key val (Map.fromList kvMap)
+--  traceIO $ show updatedKvMap
+--  B.writeFile filePath (Utils.writeKVList $ Map.toList updatedKvMap)

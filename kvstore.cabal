@@ -24,6 +24,7 @@ library
                      , time
                      , directory
                      , rainbow
+                     , MissingH
   default-language:    Haskell2010
 
 executable kvstore-master
@@ -38,6 +39,7 @@ executable kvstore-master
                      , mstate
                      , exceptions
                      , containers >= 0.5
+                     , MissingH
   default-language:    Haskell2010
 
 executable kvstore-slave
@@ -53,6 +55,9 @@ executable kvstore-slave
                      , exceptions
                      , containers >= 0.5
                      , directory
+                     , MissingH
+                     , probable
+                     , unix
   default-language:    Haskell2010
 
 executable kvstore-client

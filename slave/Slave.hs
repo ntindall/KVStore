@@ -12,14 +12,13 @@ import qualified Data.Map.Strict as Map
 
 import Data.ByteString.Lazy as B
 import Data.ByteString.Lazy.Char8 as C8
+import Data.Tuple.Utils
 
 import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Monad.Reader
 import Control.Arrow as CA
-
-import System.Exit
 
 import Control.Monad
 import Control.Concurrent.MState
@@ -32,6 +31,9 @@ import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
 import Log as LOG
 import qualified Utils
 
+import Math.Probable
+import System.Posix.Signals
+
 --- todo, touch file when slave registers
 -- todo, slave registration
 
@@ -41,7 +43,7 @@ data SlaveState = SlaveState {
                   socket :: Socket
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
-                , store :: Map.Map KVKey KVVal
+                , store :: Map.Map KVKey (KVVal, Int)
                 , unresolvedTxns :: Map.Map KVTxnId KVMessage
                 }
  --  deriving (Show)
@@ -172,42 +174,58 @@ handleRequest msg = get >>= \s -> do
       GetReq _ key     -> liftIO $ do 
         case Map.lookup key (store s)  of
           Nothing -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
-          Just val -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
+          Just val -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just (fst val))))
 
   liftIO $ IO.hClose h
 
+safeUpdateStore :: KVKey -> KVVal -> Int -> MState SlaveState IO ()
+safeUpdateStore k v ts = modifyM_ $ \s -> do
+  let oldVal = Map.lookup k (store s)
+
+  if isNothing oldVal || snd (fromJust oldVal) <= ts 
+  then s { store = Map.insert k (v,ts) (store s)}
+  else s
+
+clearTxn :: KVTxnId -> MState SlaveState IO ()
+clearTxn tid = modifyM_ $ \s -> s { unresolvedTxns = Map.delete tid (unresolvedTxns s)}
+
 handleDecision :: KVMessage -> MState SlaveState IO ()
-handleDecision msg = get >>= \s -> do
-  --liftIO exitSuccess --DIE!
-  let config = cfg s
-      field_txn  = txn_id msg
-      field_request = request msg
-      mySlaveId = getMyId config
-      (key,val) = case field_request of -- TODO, do we even need the decision to ahve the request anymore?
-                    (PutReq ts k v) -> (k,v)
-                    (GetReq ts _) -> undefined -- protocol error
+handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
+  --REMOVE THIS IF YOU WANT SLAVE TO NOT DIE PROBABALISTICALLY
+  death <- liftIO $ mwc $ intIn (1,100)
+  if (death > 80) then liftIO $ raiseSignal sigABRT --die "--DIE!"
+  else do 
+    let config = cfg s
+        maybeRequest = Map.lookup tid (unresolvedTxns s)
+        mySlaveId = getMyId config
 
-    --DEAL WITH ABORT
-    --USE BRACKET TO MAKE THIS ATOMIC
-    --WRITE TO FILE
-  modifyM_ $ \s' -> 
-    let updatedStore = Map.insert key val (store s')
-        updatedTxnMap = Map.delete field_txn (unresolvedTxns s')
-    in s' {store = updatedStore, unresolvedTxns = updatedTxnMap}
+    if isJust maybeRequest 
+    then do
+      let field_request = fromJust $ maybeRequest
+          (ts, key,val) = case request field_request of -- TODO, do we even need the decision to ahve the request anymore?
+                        (PutReq ts k v) -> (ts, k, v)
+                        (GetReq ts _) -> undefined -- protocol error
 
-    --liftM Utils.readKVList $ B.readFile $ persistentFileName mySlaveId
-    --let updatedKvMap = Map.insert key val (Map.fromList kvMap)
+      if decision == DecisionCommit 
+      then do
+        safeUpdateStore key val ts 
+        -- NEED TO FILELOCK
+        liftIO $ LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
+      else do
+        liftIO $ LOG.writeAbort (LOG.persistentLogName mySlaveId) msg
 
-    --traceIO $ show updatedKvMap
-    --B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList updatedKvMap)
-    --WRITE TO LOG
-  liftIO $ do
-    LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
-    --TODO!!! ! ! ! 
-
-    h <- KVProtocol.connectToMaster config
-    KVProtocol.sendMessage h (KVAck field_txn (Just mySlaveId) Nothing)
-    IO.hClose h
+      clearTxn tid
+      let errormsg = if decision == DecisionCommit then Nothing
+                     else Just $ C8.pack "Transaction aborted"
+      liftIO $ do
+        h <- KVProtocol.connectToMaster config
+        KVProtocol.sendMessage h (KVAck tid (Just mySlaveId) errormsg)
+        IO.hClose h
+    else --nothing to do, but need to ACK to let master know we are back alive
+      liftIO $ do
+        h <- KVProtocol.connectToMaster config
+        KVProtocol.sendMessage h (KVAck tid (Just mySlaveId) (Just "Transaction Aborted"))
+        IO.hClose h
 
 handleResponse = undefined
 handleVote = undefined
