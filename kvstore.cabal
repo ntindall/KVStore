@@ -35,6 +35,7 @@ executable kvstore-master
                      , network
                      , bytestring
                      , mtl
+                     , mstate
                      , exceptions
                      , containers >= 0.5
   default-language:    Haskell2010
