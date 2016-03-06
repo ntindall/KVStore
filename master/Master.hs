@@ -48,7 +48,7 @@ data MasterState = MasterState {
                   --
                   --when the last ACK is received, the master removes the txn_id
                   --from both Maps and sends an acknowledgement to the client.
-                , ackMap  :: Map.Map KVTxnId (Set.Set Int)
+                , ackMap  :: KVMap Int
                   --timeout map. Map from transaction id to when the server first
                   --sent a KVRequest to a shard
                 , timeoutMap :: Map.Map KVTxnId (Int, KVMessage)
@@ -60,6 +60,10 @@ data MasterState = MasterState {
 
 type KVSGetter a = MasterState -> a
 type KVSSetter a = a -> MasterState -> MasterState
+
+setVoteMap, setAckMap :: KVSSetter (KVMap Int)
+setVoteMap v s = s { voteMap = v }
+setAckMap a s = s { ackMap = a }
 
 instance Show (MasterState) where
   show (MasterState skt _ cfg voteMap ackMap timeoutMap) = 
@@ -98,20 +102,11 @@ processMessages = get >>= \s -> do
   forkM_ $ processMessage message
   processMessages
 
--- runStateMVar :: Bool -> KVState a -> KVReaderMVarS a
--- runStateMVar modify f = ask >>= \mvar -> liftIO $ do
---   s <- if modify then takeMVar mvar else readMVar mvar
---   (a, s') <- runStateT f s
---   traceIO $ "runstate"
---   traceIO $ show $ voteMap s'
---   when modify $ putMVar mvar s'
---   return a
-
 processMessage :: KVMessage -> MState MasterState IO ()
 processMessage (KVVote _ _ VoteAbort _) = undefined
 
 processMessage (KVVote tid sid VoteReady request) = do
-  addToState tid sid voteMap $ \v s -> s { voteMap = v }
+  addToState tid sid voteMap setVoteMap
   commit <- isComplete tid voteMap
   timeout <- timedOut tid voteMap
 
@@ -120,7 +115,7 @@ processMessage (KVVote tid sid VoteReady request) = do
        else return ()
 
 processMessage kvMsg@(KVResponse tid sid _) = do
-  addToState tid sid ackMap $ \a s -> s { ackMap = a }
+  addToState tid sid ackMap setAckMap
   complete <- isComplete tid ackMap
   when complete $ do
     sendMsgToClient kvMsg
@@ -212,18 +207,6 @@ sendDecisionToRing msg@(KVDecision txn_id decision req) = do
   shard <- consistentHashing msg
   mapM_ (\node -> forkM_ $ forwardToNodeWithRetry node msg KVProtocol.kV_TIMEOUT) shard 
 
--- sendDecisionToRingTest :: KVMessage -> KVState ()
--- sendDecisionToRingTest msg@(KVDecision txn_id decision req) = get >>= \s -> liftIO $ do
---    put $ state { ackMap = Map.insert txn_id Set.empty (ackMap state) } -- Note: this should not already exist in map
-
---   shard <- consistentHashing msg
-
---   liftIO $ mapM_ (\node -> do
---                     forkIO $ runReaderT (forwardToNodeWithRetry node msg KVProtocol.kV_TIMEOUT) mvar
---                   ) shard 
-
-
-
 forwardToNodeWithRetry :: (Int,HostName, PortID)
                             -> KVMessage
                             -> Int
@@ -254,15 +237,6 @@ consistentHashing msg = get >>= \s -> liftIO $ do
       slaves = slaveConfig config
   --TODO: something smarter
   return $ Foldable.toList $ Seq.mapWithIndex (\i (h,p) -> (i,h,p)) (Seq.fromList slaves)
-
---sendDecisionToRingWithRetry :: KVMessage -> Integer -> KVReaderMVarS ()
---sendDecisionToRingWithRetry decision timeout = do
---  mvar <- ask
---  state <- liftIO $ readMVar mvar
---  let acks = Map.lookup (txn_id decision) (ackMap state)
---  if acks == Nothing then return ()
---  else sendDecisionToRingWithRetry decision (timeout * 2)
-
 
 sendMsgToRing :: KVMessage -> MState MasterState IO ()
 sendMsgToRing msg = do
