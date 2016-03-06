@@ -54,10 +54,6 @@ data MasterState = MasterState {
                 , timeoutMap :: Map.Map KVTxnId (Int, KVMessage)
                 }
 
--- type Blah a = MState
--- type KVState a = StateT MasterState IO a
--- type KVReaderMVarS a = ReaderT (MVar MasterState) IO a
-
 type KVSGetter a = MasterState -> a
 type KVSSetter a = a -> MasterState -> MasterState
 
@@ -74,8 +70,8 @@ main :: IO ()
 main = Lib.parseArguments >>= \args -> case args of
   Nothing -> Lib.printUsage -- an error occured 
   Just c -> do
-    cons <- MasterState <$> listenOn (Lib.masterPortId c) <*> newChan
-    execMState initMaster $ cons c Map.empty Map.empty Map.empty
+    ms <- MasterState <$> listenOn (Lib.masterPortId c) <*> newChan
+    execMState initMaster $ ms c Map.empty Map.empty Map.empty
     return ()
 
 -- Initialization for Master Node
@@ -111,8 +107,7 @@ processMessage (KVVote tid sid VoteReady request) = do
   timeout <- timedOut tid voteMap
 
   if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
-  else if timeout then sendDecisionToRing (KVDecision tid DecisionAbort request)
-       else return ()
+  else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
 
 processMessage kvMsg@(KVResponse tid sid _) = do
   addToState tid sid ackMap setAckMap
@@ -128,8 +123,7 @@ processMessage kvMsg@(KVResponse tid sid _) = do
 
 processMessage kvMsg@(KVRequest txn_id req) = do
   now <- liftIO U.currentTimeInt
-  --Communicating with shard for the first time, keep track of this in the
-  --timeout map.
+  --Communicating with shard for the first time, keep track of this in the timeout map.
   modifyM_ $ \s -> s { timeoutMap = Map.insert txn_id (now, kvMsg) (timeoutMap s) }
   sendMsgToRing kvMsg
 
@@ -201,16 +195,13 @@ clearTX tid = get >>= \s -> do
 
 sendDecisionToRing :: KVMessage -> MState MasterState IO ()
 sendDecisionToRing msg@(KVDecision txn_id decision req) = do
-  modifyM_ $ \s -> s { ackMap = Map.insert txn_id Set.empty (ackMap s) }
   -- Note: this should not already exist in map
-  
+  modifyM_ $ \s -> s { ackMap = Map.insert txn_id Set.empty (ackMap s) }
   shard <- consistentHashing msg
   mapM_ (\node -> forkM_ $ forwardToNodeWithRetry node msg KVProtocol.kV_TIMEOUT) shard 
 
-forwardToNodeWithRetry :: (Int,HostName, PortID)
-                            -> KVMessage
-                            -> Int
-                            -> MState MasterState IO ()
+forwardToNodeWithRetry :: (Int,HostName, PortID) -> KVMessage -> Int
+                          -> MState MasterState IO ()
 forwardToNodeWithRetry (myId, hostName, portId) msg timeout = do
   s <- get
   let acks = Map.lookup (txn_id msg) (ackMap s)
