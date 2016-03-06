@@ -8,6 +8,7 @@ import Network
 
 import Data.ByteString.Lazy as B
 import Data.ByteString.Char8 as C8
+import qualified Data.List as L
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Sequence as Seq
@@ -35,7 +36,6 @@ type KVMap a = Map.Map KVTxnId (Set.Set a)
 
 --https://hackage.haskell.org/package/lrucache-1.2.0.0/docs/Data-Cache-LRU.html
 data MasterState = MasterState {
-                  --add an mvar in here
                   socket :: Socket
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
@@ -56,6 +56,8 @@ data MasterState = MasterState {
 
 type KVSGetter a = MasterState -> a
 type KVSSetter a = a -> MasterState -> MasterState
+
+data KVSlave = KVSlave { slvID :: Int , host :: HostName,  port :: PortID }
 
 setVoteMap, setAckMap :: KVSSetter (KVMap Int)
 setVoteMap v s = s { voteMap = v }
@@ -116,7 +118,7 @@ processMessage kvMsg@(KVResponse tid sid _) = do
     sendMsgToClient kvMsg
     clearTX tid
 
-  -- TODO: add tiemout for get reqs
+  -- TODO: add timeout for get reqs
   -- addAck tid sid
   -- complete <- ackComplete tid
   -- if complete then clearAcksTX tid else return ()
@@ -173,8 +175,7 @@ addToState tid val f update = modifyM_ $ \s -> do
   update (Map.insert tid set $ f s) s
 
 -- todo: change bakc to Ord a => KVMap a later
-isComplete :: Ord a => KVTxnId -> KVSGetter (KVMap a)
-           -> MState MasterState IO Bool
+isComplete :: Ord a => KVTxnId -> KVSGetter (KVMap a) -> MState MasterState IO Bool
 isComplete tid f = get >>= \s -> do
   let set = fromJust $ Map.lookup tid $ f s
   return $ Set.size set == Prelude.length (Lib.slaveConfig $ cfg s)
@@ -197,46 +198,30 @@ sendDecisionToRing msg@(KVDecision txn_id decision req) = do
   -- Note: this should not already exist in map
   modifyM_ $ \s -> s { ackMap = Map.insert txn_id Set.empty (ackMap s) }
   shard <- consistentHashing msg
-  mapM_ (\node -> forkM_ $ forwardToNodeWithRetry node msg KVProtocol.kV_TIMEOUT) shard 
+  mapM_ (\n -> forkM_ $ forwardToSlaveRetry n msg KVProtocol.kV_TIMEOUT) shard
 
-forwardToNodeWithRetry :: (Int,HostName, PortID) -> KVMessage -> Int
-                          -> MState MasterState IO ()
-forwardToNodeWithRetry (myId, hostName, portId) msg timeout = do
-  s <- get
-  let acks = Map.lookup (txn_id msg) (ackMap s)
-
-    --if there are no acks in the map, then all of the nodes in the ring have responded
-    --if the set of acks contains the current slave id, then we can also stop resending,
-    --as this node has responded
-
-  -- if (acks == Nothing || Set.member myId (fromJust acks)) then do
-  --   liftIO $ putMVar mvar state
-  -- else do
-  --   liftIO $ putMVar mvar state
-
-  if (acks == Nothing || Set.member myId (fromJust acks)) then return ()
-  else do
-    forwardToNode (myId, hostName, portId) msg
-    liftIO $ threadDelay $ timeout * 10000 -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
-    forwardToNodeWithRetry (myId, hostName, portId) msg (timeout * 2)
-
-consistentHashing :: KVMessage -> MState MasterState IO ([(Int,HostName, PortID)])
-consistentHashing msg = get >>= \s -> liftIO $ do
-  let config = cfg s
-      slaves = slaveConfig config
-  --TODO: something smarter
-  return $ Foldable.toList $ Seq.mapWithIndex (\i (h,p) -> (i,h,p)) (Seq.fromList slaves)
+--TODO: something smarter
+consistentHashing :: KVMessage -> MState MasterState IO [KVSlave]
+consistentHashing msg = get >>= \s -> do
+  let shard = L.mapAccumL (\i (h, p) -> (i+1, KVSlave i h p)) 0 (slaveConfig $ cfg s)
+  return $ snd shard
 
 sendMsgToRing :: KVMessage -> MState MasterState IO ()
-sendMsgToRing msg = do
-  shard <- consistentHashing msg
-  mapM_ (\node -> forkM_ $ forwardToNode node msg) shard 
+sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToSlave n msg)
 
-forwardToNode :: (Int,HostName, PortID)
-              -> KVMessage
-               -> MState MasterState IO ()
-forwardToNode (myId, hostName, portId) msg = do
-  result <- tryConnect hostName portId msg
+forwardToSlaveRetry :: KVSlave -> KVMessage -> Int -> MState MasterState IO ()
+forwardToSlaveRetry slv msg timeout = get >>= \s -> do
+  -- We can stop resending if we've received an ack from the node
+  let forwardNeeded = not . Set.member (slvID slv) <$> Map.lookup (txn_id msg) (ackMap s)
+  when (fromMaybe False forwardNeeded) $ do
+    forwardToSlave slv msg
+    -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
+    liftIO $ threadDelay $ timeout * 10000
+    forwardToSlaveRetry slv msg (timeout * 2)
+
+forwardToSlave :: KVSlave -> KVMessage -> MState MasterState IO ()
+forwardToSlave slv msg = do
+  result <- tryConnect slv msg
   case result of
     Just h -> do
       liftIO $ do
@@ -244,12 +229,9 @@ forwardToNode (myId, hostName, portId) msg = do
         hClose h
     Nothing -> liftIO $ return ()
 
-tryConnect :: HostName
-           -> PortID
-           -> KVMessage
-           -> MState MasterState IO (Maybe Handle)
-tryConnect name portId msg = do
-  result <- liftIO $ Catch.try $ connectTo name portId
+tryConnect :: KVSlave -> KVMessage -> MState MasterState IO (Maybe Handle)
+tryConnect slv msg = do
+  result <- liftIO $ Catch.try $ connectTo (host slv) (port slv)
   case result of
     Left (e :: SomeException) -> do
       -- the connection time out, meaning that the transaction should be aborted.
