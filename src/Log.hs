@@ -29,13 +29,14 @@ getSeparator = " " --todo, escaping?
 writeReady :: FilePath -> KVMessage -> IO()
 writeReady filename msg = do
   -- LOG READY, <timestamp, txn_id, key, newval>
-  time <- Utils.currentTimeInt
+  -- time <- Utils.currentTimeInt
   let field_txn = txn_id msg
       field_request = request msg
+      field_issuedUTC = issuedUTC field_request --use the timestamp the request was made
       key = putkey field_request
       val = putval field_request
       sep = getSeparator
-      logEntry = (C8.intercalate sep [C8.pack "READY", C8.pack $ show field_txn, key, val, C8.pack $ show time]) `C8.append` (C8.pack "\n")
+      logEntry = (C8.intercalate sep [C8.pack "READY", C8.pack $ show field_txn, key, val, C8.pack $ show field_issuedUTC]) `C8.append` (C8.pack "\n")
 
   B.appendFile filename logEntry
 
@@ -62,16 +63,17 @@ rebuild logPath oldStore = do
 
   let unfinishedReqList = Map.toList unfinishedReqs
 
-  return (Map.fromList $ List.map (\(txn_id,(k,v)) -> 
+  return (Map.fromList $ List.map (\(txn_id,(k,v,ts)) -> 
                                     let txn_id' = read (C8.unpack txn_id) :: (Int, Int)
-                                    in (txn_id', KVRequest txn_id' (PutReq k v))
+                                        ts_int  = read (C8.unpack ts)     :: Int
+                                    in (txn_id', KVRequest txn_id' (PutReq ts_int k v))
                                   ) unfinishedReqList
          , updatedStore)
 
 handleLines :: [B.ByteString]                      --each line in the file
-            -> Map.Map B.ByteString (KVKey, KVVal) --unmatched ready map accumulator
+            -> Map.Map B.ByteString (KVKey, KVVal, B.ByteString) --unmatched ready map accumulator
             -> Map.Map KVKey KVVal                 --store accumulator
-            -> IO(Map.Map B.ByteString (KVKey, KVVal), Map.Map KVKey KVVal)
+            -> IO(Map.Map B.ByteString (KVKey, KVVal, B.ByteString), Map.Map KVKey KVVal)
 handleLines [] unmatchedReadyMap storeMap = return (unmatchedReadyMap, storeMap)
 handleLines (x:xs) unmatchedReadyMap storeMap 
   | C8.null x = handleLines xs unmatchedReadyMap storeMap
@@ -87,11 +89,11 @@ handleLines (x:xs) unmatchedReadyMap storeMap
         let key = pieces !! 2
             val = pieces !! 3
             ts  = pieces !! 4
-            unmatchedReadyMap' = Map.insert txn_id (key, val) unmatchedReadyMap
+            unmatchedReadyMap' = Map.insert txn_id (key, val, ts) unmatchedReadyMap
         handleLines xs unmatchedReadyMap' storeMap
       "COMMIT" -> do
         case Map.lookup txn_id unmatchedReadyMap of
-          (Just (k,v)) ->
+          (Just (k,v,_)) ->
             handleLines xs (Map.delete txn_id unmatchedReadyMap) 
                            (Map.insert k v storeMap)
           Nothing -> do

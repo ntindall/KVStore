@@ -1,6 +1,2 @@
-<<<<<<< HEAD
-hello=2
-=======
-bob=marley
-joe=shmoe
->>>>>>> colin2
+3=hello
+hello=3

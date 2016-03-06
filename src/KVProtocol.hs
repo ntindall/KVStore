@@ -37,10 +37,12 @@ type KVTxnId = (Int, Int) -- (client_id, txn_id)
 -- TODO, with more clients, need txn_id to be (txn_id, client_id) tuples
 
 data KVRequest = GetReq {
-                  reqkey :: KVKey
+                  issuedUTC :: Int
+                , reqkey :: KVKey
                 }
                | PutReq {
-                  putkey :: KVKey
+                  issuedUTC :: Int
+                , putkey :: KVKey
                 , putval :: KVVal
                 }
   deriving (Generic, Show)

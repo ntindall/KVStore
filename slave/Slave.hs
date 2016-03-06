@@ -169,7 +169,7 @@ handleRequest msg = do
         mySlaveId = getMyId config
 
     case field_request of
-        PutReq key val -> do
+        PutReq ts key val -> do
           -- LOG READY, <timestamp, txn_id, key, newval>
 
           state' <- takeMVar mvar
@@ -183,7 +183,7 @@ handleRequest msg = do
 
           KVProtocol.sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
           --vote abort if invalid key value
-        GetReq key     -> do
+        GetReq _ key     -> do
           case Map.lookup key (store state)  of
             Nothing -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
             Just val -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just val)))
@@ -200,9 +200,9 @@ handleDecision msg = do
         field_txn  = txn_id msg
         field_request = request msg
         mySlaveId = getMyId config
-        (key,val) = case field_request of
-                      (PutReq k v) -> (k,v)
-                      (GetReq _) -> undefined -- protocol error
+        (key,val) = case field_request of -- TODO, do we even need the decision to ahve the request anymore?
+                      (PutReq ts k v) -> (k,v)
+                      (GetReq ts _) -> undefined -- protocol error
 
     --DEAL WITH ABORT
     --USE BRACKET TO MAKE THIS ATOMIC

@@ -152,10 +152,14 @@ putVal :: MVar ClientState
        -> KVKey
        -> KVVal
        -> IO(KVVal)
-putVal mvar k v = sendRequestAndWaitForResponse mvar (PutReq k v)
+putVal mvar k v = do
+  now <- Utils.currentTimeInt
+  sendRequestAndWaitForResponse mvar (PutReq now k v)
 
 
 getVal :: MVar ClientState
        -> KVKey
        -> IO(KVVal)
-getVal mvar k = sendRequestAndWaitForResponse mvar (GetReq k)
+getVal mvar k = do
+  now <- Utils.currentTimeInt
+  sendRequestAndWaitForResponse mvar (GetReq now k)
