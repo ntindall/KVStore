@@ -3,12 +3,14 @@ module Utils where
 import Data.ByteString.Lazy.Char8 as C8
 import Data.ByteString.Lazy as B
 
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+
 import Data.Time.Clock.POSIX
 
 import Network as NETWORK
 import Network.Socket as SOCKET
 import Network.BSD as BSD
-
 
 import Control.Arrow
 import Control.Exception
@@ -38,3 +40,11 @@ getFreeSocket = do
         SOCKET.listen sock maxListenQueue
         return sock
     )
+
+insertM :: Ord a => a -> b -> Maybe (Map.Map a b) -> Map.Map a b
+insertM k v (Just m) = Map.insert k v m
+insertM k v Nothing = Map.singleton k v
+
+insertS :: Ord a => a -> Maybe (Set.Set a) -> Set.Set a
+insertS v (Just s) = Set.insert v s
+insertS v Nothing = Set.singleton v

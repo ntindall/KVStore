@@ -1,1 +1,7 @@
+<<<<<<< HEAD
 hello=
+=======
+bob=marley
+colin=hi
+joe=shmoe
+>>>>>>> colin2
