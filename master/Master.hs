@@ -15,6 +15,8 @@ import qualified Data.Foldable as Foldable
 
 import Data.Maybe
 
+import Control.Monad.State
+
 import Control.Exception
 import Control.Monad.Reader
 import Control.Monad.Catch as Catch
@@ -28,6 +30,8 @@ import Debug.Trace
 
 import qualified Utils as U
 
+type KVMap a = Map.Map KVTxnId (Set.Set a)
+
 --https://hackage.haskell.org/package/lrucache-1.2.0.0/docs/Data-Cache-LRU.html
 data MasterState = MasterState {
                   --add an mvar in here
@@ -36,7 +40,8 @@ data MasterState = MasterState {
                 , cfg :: Lib.Config
                   --the votemap contains as a key the txn id, and has as a value
                   --the set of slaves that have responded with a READY vote
-                , voteMap :: Map.Map KVTxnId (Set.Set Int)
+                -- , voteMap :: Map.Map KVTxnId (Set.Set Int)
+                , voteMap :: KVMap Int
                   --the ackMap contains as a key the txn id, and has as a value
                   --the set of slaves that have responded with an ACK
                   --
@@ -47,6 +52,11 @@ data MasterState = MasterState {
                   --sent a KVRequest to a shard
                 , timeoutMap :: Map.Map KVTxnId (Int, KVMessage)
                 }
+
+type KVState a = StateT MasterState IO a
+type KVReaderMVarS a = ReaderT (MVar MasterState) IO a
+type KVSGetter a = MasterState -> a
+type KVSSetter a = a -> MasterState -> MasterState
 
 instance Show (MasterState) where
   show (MasterState skt _ cfg voteMap ackMap timeoutMap) = 
@@ -67,7 +77,7 @@ runKVMaster (Just c) = do
   processMessages mvar
 
 -- Listen and write to thread-safe channel
-listen :: ReaderT (MVar MasterState) IO ()
+listen :: KVReaderMVarS ()
 listen = ask >>= \mvar -> do
   liftIO $ do
     s <- readMVar mvar
@@ -85,13 +95,23 @@ processMessages mvar = do
   _ <- forkIO $ runReaderT (processMessage message) mvar
   processMessages mvar
 
-processMessage :: KVMessage -> ReaderT (MVar MasterState) IO ()
+runStateMVar :: Bool -> KVState a -> KVReaderMVarS a
+runStateMVar modify f = ask >>= \mvar -> liftIO $ do
+  s <- if modify then takeMVar mvar else readMVar mvar
+  (a, s') <- runStateT f s
+  traceIO $ "runstate"
+  traceIO $ show $ voteMap s'
+  when modify $ putMVar mvar s'
+  return a
+
+processMessage :: KVMessage -> KVReaderMVarS ()
 processMessage (KVVote _ _ VoteAbort _) = undefined
 
 processMessage (KVVote tid sid VoteReady request) = do
-  addVote tid sid
-  commit <- votingComplete tid
-  timeout <- timedOut tid
+  (commit, timeout) <- runStateMVar True $ do
+    addVote tid sid voteMap (\v s -> s { voteMap = v })
+    (,) <$> votingComplete tid voteMap <*> timedOut tid voteMap
+
   if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
   else if timeout then sendDecisionToRing (KVDecision tid DecisionAbort request)
        else return ()
@@ -148,7 +168,7 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
 
 processMessage _ = undefined
 
-timeoutThread :: ReaderT (MVar MasterState) IO ()
+timeoutThread :: KVReaderMVarS ()
 timeoutThread = do
   mvar <- ask
 
@@ -168,45 +188,56 @@ timeoutThread = do
   liftIO $ threadDelay 10000000
   timeoutThread
 
-addVote :: KVTxnId -> Int -> ReaderT (MVar MasterState) IO ()
-addVote tid sid = ask >>= \mvar -> liftIO $ do
-  s <- takeMVar mvar
-  traceIO $ "adding vote to" ++ show tid
-  let v = fromJust $ Map.lookup tid (voteMap s)
-  putMVar mvar $ s { voteMap = Map.insert tid (Set.insert sid v) $ voteMap s }
-  traceIO (show s)
+-- addVote :: KVTxnId -> Int -> KVReaderMVarS ()
+-- addVote tid sid = ask >>= \mvar -> liftIO $ do
+--   s <- takeMVar mvar
+--   traceIO $ "adding vote to" ++ show tid
+--   let v = fromJust $ Map.lookup tid (voteMap s)
+--   putMVar mvar $ s { voteMap = Map.insert tid (Set.insert sid v) $ voteMap s }
+--   traceIO (show s)
 
-votingComplete :: KVTxnId -> ReaderT (MVar MasterState) IO Bool
-votingComplete tid = ask >>= \mvar -> liftIO $ do
-  s <- readMVar mvar
-  traceIO (show s)
-  traceIO $ "voting complete"
-  let v = fromJust $ Map.lookup tid $ voteMap s
-  return $ Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
-
-timedOut :: KVTxnId -> ReaderT (MVar MasterState) IO Bool
-timedOut tid = ask >>= \mvar -> liftIO $ do
-  s <- readMVar mvar
-  now <- U.currentTimeInt
-  let (ts, _) = fromJust $ Map.lookup tid (timeoutMap s)
-  return $ now - KVProtocol.kV_TIMEOUT >= ts
-
-addAck :: KVTxnId -> Int -> ReaderT (MVar MasterState) IO ()
+addAck :: KVTxnId -> Int -> KVReaderMVarS ()
 addAck tid sid = ask >>= \mvar -> liftIO $ do
-  s <- takeMVar mvar
-  traceIO $ "adding ack to" ++ show tid ++ " for slave " ++ show sid
+ s <- takeMVar mvar
+ traceIO $ "adding ack to" ++ show tid ++ " for slave " ++ show sid
+ -- use ackMap to keep track of which transactions on the GET pathway have been
+ -- forwarded to the client
+ let acks = U.insertS sid $ Map.lookup tid $ ackMap s
+ putMVar mvar $ s { ackMap = Map.insert tid acks $ ackMap s }
+
+addVote :: KVTxnId -> Int -> KVSGetter (KVMap Int) -> KVSSetter (KVMap Int) -> KVState ()
+addVote tid sid f update = get >>= \s -> do
+  liftIO . traceIO . show $ Map.lookup tid $ f s
+  let set = U.insertS sid $ Map.lookup tid $ f s
+  liftIO $ traceIO $ show set
+  put $ update (Map.insert tid set $ f s) s
+  liftIO $ traceIO $ show $ voteMap $ update (Map.insert tid set $ f s) s
+  -- liftIO $ traceIO $ "adding " ++ show f ++ " to" ++ show tid ++ " for slave " ++ show sid
+
   -- use ackMap to keep track of which transactions on the GET pathway have been
   -- forwarded to the client
-  let acks = U.insertS sid $ Map.lookup tid $ ackMap s
-  putMVar mvar $ s { ackMap = Map.insert tid acks $ ackMap s }
+  -- let acks = U.insertS sid $ Map.lookup tid $ ackMap s
+  -- putMVar mvar $ s { ackMap = Map.insert tid acks $ ackMap s }
 
-clearAcksTX :: KVTxnId -> ReaderT (MVar MasterState) IO ()
-clearAcksTX tid = ask >>= \mvar -> liftIO $ do
-  s <- takeMVar mvar               
-  putMVar mvar $ s { ackMap = Map.delete tid $ ackMap s }
+    -- todo: change bakc to Ord a => KVMap a later
+votingComplete :: KVTxnId -> KVSGetter (KVMap Int) -> KVState Bool
+votingComplete tid f = get >>= \s -> do
+  let set = fromJust $ Map.lookup tid $ f s
+  liftIO $ traceIO $ "voting complete running"
+  liftIO $ traceIO $ show $ Set.size set == Prelude.length (Lib.slaveConfig $ cfg s)
+  liftIO $ traceIO $ show set
+  return $ Set.size set == Prelude.length (Lib.slaveConfig $ cfg s)
+
+-- votingComplete :: KVTxnId -> KVReaderMVarS Bool
+-- votingComplete tid = ask >>= \mvar -> liftIO $ do
+--   s <- readMVar mvar
+--   traceIO (show s)
+--   traceIO $ "voting complete"
+--   let v = fromJust $ Map.lookup tid $ voteMap s
+--   return $ Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
 
 -- TODO: change these maps to map to tuples so that we can keep track of whether they are 'complete'
-ackComplete :: KVTxnId -> ReaderT (MVar MasterState) IO Bool
+ackComplete :: KVTxnId -> KVReaderMVarS Bool
 ackComplete tid = ask >>= \mvar -> liftIO $ do
  s <- readMVar mvar
  traceIO (show s)
@@ -215,7 +246,20 @@ ackComplete tid = ask >>= \mvar -> liftIO $ do
  let v = fromJust $ Map.lookup tid $ ackMap s
  return $ Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
 
-clearTX :: KVTxnId -> ReaderT (MVar MasterState) IO ()
+timedOut :: KVTxnId -> KVSGetter (KVMap a) -> KVState Bool
+timedOut tid f = get >>= \s -> liftIO $ do
+  now <- U.currentTimeInt
+  let (ts, _) = fromJust $ Map.lookup tid (timeoutMap s)
+  return $ now - KVProtocol.kV_TIMEOUT >= ts
+
+-- timedOut :: KVTxnId -> KVReaderMVarS Bool
+-- timedOut tid = ask >>= \mvar -> liftIO $ do
+--   s <- readMVar mvar
+--   now <- U.currentTimeInt
+--   let (ts, _) = fromJust $ Map.lookup tid (timeoutMap s)
+--   return $ now - KVProtocol.kV_TIMEOUT >= ts
+
+clearTX :: KVTxnId -> KVReaderMVarS ()
 clearTX tid = ask >>= \mvar -> liftIO $ do
   s <- takeMVar mvar
   putMVar mvar $ s { ackMap = Map.delete tid $ ackMap s, 
@@ -223,7 +267,7 @@ clearTX tid = ask >>= \mvar -> liftIO $ do
                      timeoutMap = Map.delete tid $ timeoutMap s }
   traceIO $ "cleared txid" ++ show tid
 
-sendDecisionToRing :: KVMessage -> ReaderT (MVar MasterState) IO ()
+sendDecisionToRing :: KVMessage -> KVReaderMVarS ()
 sendDecisionToRing msg@(KVDecision txn_id decision req) = do
   mvar <- ask
   liftIO $ do
@@ -236,10 +280,22 @@ sendDecisionToRing msg@(KVDecision txn_id decision req) = do
                     forkIO $ runReaderT (forwardToNodeWithRetry node msg KVProtocol.kV_TIMEOUT) mvar
                   ) shard 
 
+-- sendDecisionToRingTest :: KVMessage -> KVState ()
+-- sendDecisionToRingTest msg@(KVDecision txn_id decision req) = get >>= \s -> liftIO $ do
+--    put $ state { ackMap = Map.insert txn_id Set.empty (ackMap state) } -- Note: this should not already exist in map
+
+--   shard <- consistentHashing msg
+
+--   liftIO $ mapM_ (\node -> do
+--                     forkIO $ runReaderT (forwardToNodeWithRetry node msg KVProtocol.kV_TIMEOUT) mvar
+--                   ) shard 
+
+
+
 forwardToNodeWithRetry :: (Int,HostName, PortID)
                             -> KVMessage
                             -> Int
-                            -> ReaderT (MVar MasterState) IO()
+                            -> KVReaderMVarS()
 forwardToNodeWithRetry (myId, hostName, portId) msg timeout = do
   mvar <- ask
   state <- liftIO $ takeMVar mvar
@@ -259,7 +315,7 @@ forwardToNodeWithRetry (myId, hostName, portId) msg timeout = do
     forwardToNodeWithRetry (myId, hostName, portId) msg (timeout * 2)
 
 
-consistentHashing :: KVMessage -> ReaderT (MVar MasterState) IO ([(Int,HostName, PortID)])
+consistentHashing :: KVMessage -> KVReaderMVarS ([(Int,HostName, PortID)])
 consistentHashing msg = do
   mvar <- ask
   liftIO $ do
@@ -269,7 +325,7 @@ consistentHashing msg = do
     --TODO: something smarter
     return $ Foldable.toList $ Seq.mapWithIndex (\i (h,p) -> (i,h,p)) (Seq.fromList slaves)
 
---sendDecisionToRingWithRetry :: KVMessage -> Integer -> ReaderT (MVar MasterState) IO ()
+--sendDecisionToRingWithRetry :: KVMessage -> Integer -> KVReaderMVarS ()
 --sendDecisionToRingWithRetry decision timeout = do
 --  mvar <- ask
 --  state <- liftIO $ readMVar mvar
@@ -278,7 +334,7 @@ consistentHashing msg = do
 --  else sendDecisionToRingWithRetry decision (timeout * 2)
 
 
-sendMsgToRing :: KVMessage -> ReaderT (MVar MasterState) IO ()
+sendMsgToRing :: KVMessage -> KVReaderMVarS ()
 sendMsgToRing msg = do
   mvar <- ask
 
@@ -290,7 +346,7 @@ sendMsgToRing msg = do
 
 forwardToNode :: (Int,HostName, PortID)
               -> KVMessage
-              -> ReaderT (MVar MasterState) IO()
+              -> KVReaderMVarS()
 forwardToNode (myId, hostName, portId) msg = do
   result <- tryConnect hostName portId msg
   case result of
@@ -303,7 +359,7 @@ forwardToNode (myId, hostName, portId) msg = do
 tryConnect :: HostName
            -> PortID
            -> KVMessage
-           -> ReaderT (MVar MasterState) IO(Maybe Handle)
+           -> KVReaderMVarS(Maybe Handle)
 tryConnect name portId msg = do
   result <- liftIO $ Catch.try $ connectTo name portId
   case result of
@@ -340,7 +396,7 @@ tryConnect name portId msg = do
 --            Right h -> return h
 
 
-sendMsgToClient :: KVMessage -> ReaderT (MVar MasterState) IO ()
+sendMsgToClient :: KVMessage -> KVReaderMVarS ()
 sendMsgToClient msg = ask >>= \mvar -> liftIO $ do
   s <- readMVar mvar
   let clientId = fst (txn_id msg)
