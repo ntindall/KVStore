@@ -5,4 +5,5 @@ extra-deps:
 - derive-2.5.22
 - stylish-haskell-0.5.14.3
 - rainbow-0.26.0.6
+- probable-0.1.1
 resolver: lts-3.20

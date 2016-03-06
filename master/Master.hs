@@ -8,6 +8,8 @@ import Network
 
 import Data.ByteString.Lazy as B
 import Data.ByteString.Char8 as C8
+import Data.Tuple.Utils
+
 import qualified Data.List as L
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as S
@@ -103,8 +105,8 @@ listen = get >>= \s -> do
     let process = either (IO.putStr . show . (++ "\n")) (writeChan $ channel s)
     Catch.bracket
       (accept $ socket s) 
-      (hClose . Lib.fst')
-      ((>>= process) . KVProtocol.getMessage . Lib.fst')
+      (hClose . fst3)
+      ((>>= process) . KVProtocol.getMessage . fst3)
   listen
 
 processMessages :: MState MasterState IO ()

@@ -57,10 +57,10 @@ data KVResponse = KVSuccess {
   deriving (Generic, Show)
 
 data KVDecision = DecisionCommit | DecisionAbort
-  deriving (Generic, Show)
+  deriving (Generic, Show, Eq)
 
 data KVVote = VoteReady | VoteAbort
-  deriving (Generic, Show)
+  deriving (Generic, Show, Eq)
 
 data KVMessage = KVRegistration {
                   txn_id :: KVTxnId
@@ -94,11 +94,7 @@ data KVMessage = KVRegistration {
                }        
   deriving (Generic, Show)
 
-data KVObject = KBObject B.ByteString B.ByteString
-  deriving (Generic, Show)
-
 instance Serialize KVRequest
-instance Serialize KVObject
 instance Serialize KVMessage
 instance Serialize KVResponse
 instance Serialize KVDecision

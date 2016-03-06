@@ -2,7 +2,6 @@ module Lib
     ( printUsage
     , options
     , parseArguments
-    , fst'
     , Mode
     , Config(..)
     ) where
@@ -11,6 +10,7 @@ import System.Console.GetOpt
 import System.Environment
 import System.IO
 import Network
+import Data.Tuple.Utils
 
 import Debug.Trace
 
@@ -66,26 +66,13 @@ parseOptions l = optionsAcc l (False, 1, Nothing)
           | otherwise =
             let opt = head l'
             in case opt of
-              Local      -> optionsAcc (tail l') (True, snd' acc, thrd acc)
-              RingSize n -> optionsAcc (tail l') (fst' acc, n, thrd acc)
-              SlaveNum s -> optionsAcc (tail l') (fst' acc, snd' acc, Just s)
+              Local      -> optionsAcc (tail l') (True, snd3 acc, thd3 acc)
+              RingSize n -> optionsAcc (tail l') (fst3 acc, n, thd3 acc)
+              SlaveNum s -> optionsAcc (tail l') (fst3 acc, snd3 acc, Just s)
 
 allocSlaves :: Bool                                --is the configuration local?
             -> Int                                 --ring size
             -> [(HostName, PortID)]
 allocSlaves True n  = zip (replicate n "localhost") (map PortNumber [1064..])
 allocSlaves False _ = undefined --not implemented yet
-
----------------- HELPER FUNCTIONS -------------------
-
--- TODO: Move to utils
-
-fst' :: (a,b,c) -> a
-fst' (a,_,_) = a
-
-snd' :: (a,b,c) -> b
-snd' (_,b,_) = b
-
-thrd :: (a,b,c) -> c
-thrd (_,_,c) = c
 
