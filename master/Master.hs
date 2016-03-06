@@ -109,20 +109,20 @@ processMessage (KVVote _ _ VoteAbort _) = undefined
 
 processMessage (KVVote tid sid VoteReady request) = do
   (commit, timeout) <- runStateMVar True $ do
-    addVote tid sid voteMap (\v s -> s { voteMap = v })
-    (,) <$> votingComplete tid voteMap <*> timedOut tid voteMap
+    addToState tid sid voteMap $ \v s -> s { voteMap = v }
+    (,) <$> isComplete tid voteMap <*> timedOut tid voteMap
 
   if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
   else if timeout then sendDecisionToRing (KVDecision tid DecisionAbort request)
        else return ()
 
-processMessage kvMsg@(KVResponse tid sid _) = do
-  addAck tid sid
-  complete <- ackComplete tid
-  if complete then do
+processMessage kvMsg@(KVResponse tid sid _) = runStateMVar True $ do
+  addToState tid sid ackMap $ \a s -> s { ackMap = a }
+  complete <- isComplete tid ackMap
+  when complete $ do
     sendMsgToClient kvMsg
     clearTX tid
-  else return ()
+
   -- TODO: add tiemout for get reqs
   -- addAck tid sid
   -- complete <- ackComplete tid
@@ -141,13 +141,12 @@ processMessage kvMsg@(KVRequest txn_id req) = ask >>= \mvar -> do
 
   sendMsgToRing kvMsg
 
-processMessage (KVAck tid (Just sid)) = do
-  addAck tid sid
-  complete <- ackComplete tid
-  if complete then do
+processMessage (KVAck tid (Just sid)) = runStateMVar True $ do
+  addToState tid sid ackMap $ \a s -> s { ackMap = a }
+  complete <- isComplete tid ackMap
+  when complete $ do
     clearTX tid
     sendMsgToClient $ KVAck tid Nothing
-  else return ()
 
 processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
   mvar <- ask
@@ -188,63 +187,35 @@ timeoutThread = do
   liftIO $ threadDelay 10000000
   timeoutThread
 
--- addVote :: KVTxnId -> Int -> KVReaderMVarS ()
--- addVote tid sid = ask >>= \mvar -> liftIO $ do
---   s <- takeMVar mvar
---   traceIO $ "adding vote to" ++ show tid
---   let v = fromJust $ Map.lookup tid (voteMap s)
---   putMVar mvar $ s { voteMap = Map.insert tid (Set.insert sid v) $ voteMap s }
---   traceIO (show s)
+-- addAck :: KVTxnId -> Int -> KVReaderMVarS ()
+-- addAck tid sid = ask >>= \mvar -> liftIO $ do
+--  s <- takeMVar mvar
+--  traceIO $ "adding ack to" ++ show tid ++ " for slave " ++ show sid
+--  -- use ackMap to keep track of which transactions on the GET pathway have been
+--  -- forwarded to the client
+--  let acks = U.insertS sid $ Map.lookup tid $ ackMap s
+--  putMVar mvar $ s { ackMap = Map.insert tid acks $ ackMap s }
 
-addAck :: KVTxnId -> Int -> KVReaderMVarS ()
-addAck tid sid = ask >>= \mvar -> liftIO $ do
- s <- takeMVar mvar
- traceIO $ "adding ack to" ++ show tid ++ " for slave " ++ show sid
- -- use ackMap to keep track of which transactions on the GET pathway have been
- -- forwarded to the client
- let acks = U.insertS sid $ Map.lookup tid $ ackMap s
- putMVar mvar $ s { ackMap = Map.insert tid acks $ ackMap s }
+-- -- TODO: change these maps to map to tuples so that we can keep track of whether they are 'complete'
+-- ackComplete :: KVTxnId -> KVReaderMVarS Bool
+-- ackComplete tid = ask >>= \mvar -> liftIO $ do
+--  s <- readMVar mvar
+--  traceIO (show s)
+--  traceIO $ "ack complete"
+--  traceIO (show $ ackMap s)
+--  let v = fromJust $ Map.lookup tid $ ackMap s
+--  return $ Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
 
-addVote :: KVTxnId -> Int -> KVSGetter (KVMap Int) -> KVSSetter (KVMap Int) -> KVState ()
-addVote tid sid f update = get >>= \s -> do
-  liftIO . traceIO . show $ Map.lookup tid $ f s
-  let set = U.insertS sid $ Map.lookup tid $ f s
-  liftIO $ traceIO $ show set
+addToState :: Ord a => KVTxnId -> a -> KVSGetter (KVMap a) -> KVSSetter (KVMap a) -> KVState ()
+addToState tid val f update = get >>= \s -> do
+  let set = U.insertS val $ Map.lookup tid $ f s
   put $ update (Map.insert tid set $ f s) s
-  liftIO $ traceIO $ show $ voteMap $ update (Map.insert tid set $ f s) s
-  -- liftIO $ traceIO $ "adding " ++ show f ++ " to" ++ show tid ++ " for slave " ++ show sid
 
-  -- use ackMap to keep track of which transactions on the GET pathway have been
-  -- forwarded to the client
-  -- let acks = U.insertS sid $ Map.lookup tid $ ackMap s
-  -- putMVar mvar $ s { ackMap = Map.insert tid acks $ ackMap s }
-
-    -- todo: change bakc to Ord a => KVMap a later
-votingComplete :: KVTxnId -> KVSGetter (KVMap Int) -> KVState Bool
-votingComplete tid f = get >>= \s -> do
+-- todo: change bakc to Ord a => KVMap a later
+isComplete :: Ord a => KVTxnId -> KVSGetter (KVMap a) -> KVState Bool
+isComplete tid f = get >>= \s -> do
   let set = fromJust $ Map.lookup tid $ f s
-  liftIO $ traceIO $ "voting complete running"
-  liftIO $ traceIO $ show $ Set.size set == Prelude.length (Lib.slaveConfig $ cfg s)
-  liftIO $ traceIO $ show set
   return $ Set.size set == Prelude.length (Lib.slaveConfig $ cfg s)
-
--- votingComplete :: KVTxnId -> KVReaderMVarS Bool
--- votingComplete tid = ask >>= \mvar -> liftIO $ do
---   s <- readMVar mvar
---   traceIO (show s)
---   traceIO $ "voting complete"
---   let v = fromJust $ Map.lookup tid $ voteMap s
---   return $ Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
-
--- TODO: change these maps to map to tuples so that we can keep track of whether they are 'complete'
-ackComplete :: KVTxnId -> KVReaderMVarS Bool
-ackComplete tid = ask >>= \mvar -> liftIO $ do
- s <- readMVar mvar
- traceIO (show s)
- traceIO $ "ack complete"
- traceIO (show $ ackMap s)
- let v = fromJust $ Map.lookup tid $ ackMap s
- return $ Set.size v == Prelude.length (Lib.slaveConfig $ cfg s)
 
 timedOut :: KVTxnId -> KVSGetter (KVMap a) -> KVState Bool
 timedOut tid f = get >>= \s -> liftIO $ do
@@ -252,20 +223,12 @@ timedOut tid f = get >>= \s -> liftIO $ do
   let (ts, _) = fromJust $ Map.lookup tid (timeoutMap s)
   return $ now - KVProtocol.kV_TIMEOUT >= ts
 
--- timedOut :: KVTxnId -> KVReaderMVarS Bool
--- timedOut tid = ask >>= \mvar -> liftIO $ do
---   s <- readMVar mvar
---   now <- U.currentTimeInt
---   let (ts, _) = fromJust $ Map.lookup tid (timeoutMap s)
---   return $ now - KVProtocol.kV_TIMEOUT >= ts
-
-clearTX :: KVTxnId -> KVReaderMVarS ()
-clearTX tid = ask >>= \mvar -> liftIO $ do
-  s <- takeMVar mvar
-  putMVar mvar $ s { ackMap = Map.delete tid $ ackMap s, 
-                     voteMap = Map.delete tid $ voteMap s,
-                     timeoutMap = Map.delete tid $ timeoutMap s }
-  traceIO $ "cleared txid" ++ show tid
+clearTX :: KVTxnId -> KVState ()
+clearTX tid = get >>= \s -> do
+  put $ s { ackMap = Map.delete tid $ ackMap s, 
+            voteMap = Map.delete tid $ voteMap s,
+            timeoutMap = Map.delete tid $ timeoutMap s }
+  liftIO $ traceIO $ "cleared txid" ++ show tid
 
 sendDecisionToRing :: KVMessage -> KVReaderMVarS ()
 sendDecisionToRing msg@(KVDecision txn_id decision req) = do
@@ -395,10 +358,8 @@ tryConnect name portId msg = do
 --                    mandateConnection name portId
 --            Right h -> return h
 
-
-sendMsgToClient :: KVMessage -> KVReaderMVarS ()
-sendMsgToClient msg = ask >>= \mvar -> liftIO $ do
-  s <- readMVar mvar
+sendMsgToClient :: KVMessage -> KVState ()
+sendMsgToClient msg = get >>= \s -> liftIO $ do
   let clientId = fst (txn_id msg)
       clientCfgList = Lib.clientConfig $ cfg s
 
