@@ -10,7 +10,7 @@ import Data.ByteString.Lazy as B
 import Data.ByteString.Char8 as C8
 import qualified Data.List as L
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
+import qualified Data.Set as S
 import qualified Data.Sequence as Seq
 import qualified Data.Foldable as Foldable
 
@@ -32,7 +32,10 @@ import Debug.Trace
 
 import qualified Utils as U
 
-type KVMap a = Map.Map KVTxnId (Set.Set a)
+type Time = Int
+type SlvId = Int
+
+-- type KVMap a = Map.Map KVTxnId (Set.Set a)
 
 --https://hackage.haskell.org/package/lrucache-1.2.0.0/docs/Data-Cache-LRU.html
 data MasterState = MasterState {
@@ -41,31 +44,41 @@ data MasterState = MasterState {
                 , cfg :: Lib.Config
                   --the votemap contains as a key the txn id, and has as a value
                   --the set of slaves that have responded with a READY vote
+                , txs :: Map.Map KVTxnId TX
                 -- , voteMap :: Map.Map KVTxnId (Set.Set Int)
-                , voteMap :: KVMap Int
-                  --the ackMap contains as a key the txn id, and has as a value
-                  --the set of slaves that have responded with an ACK
-                  --
-                  --when the last ACK is received, the master removes the txn_id
-                  --from both Maps and sends an acknowledgement to the client.
-                , ackMap  :: KVMap Int
-                  --timeout map. Map from transaction id to when the server first
-                  --sent a KVRequest to a shard
-                , timeoutMap :: Map.Map KVTxnId (Int, KVMessage)
+                -- , voteMap :: KVMap Int
+                --   --the ackMap contains as a key the txn id, and has as a value
+                --   --the set of slaves that have responded with an ACK
+                --   --
+                --   --when the last ACK is received, the master removes the txn_id
+                --   --from both Maps and sends an acknowledgement to the client.
+                -- , ackMap  :: KVMap Int
+                --   --timeout map. Map from transaction id to when the server first
+                --   --sent a KVRequest to a shard
+                -- , timeoutMap :: Map.Map KVTxnId (Int, KVMessage)
                 }
-
-type KVSGetter a = MasterState -> a
-type KVSSetter a = a -> MasterState -> MasterState
+                   
+data TXState = VOTE | ACK | RESPONSE
+data TX = TX {
+  txState :: TXState,
+  responded :: S.Set SlvId,
+  timeout :: Time,
+  message :: KVMessage
+}
 
 data KVSlave = KVSlave { slvID :: Int , host :: HostName,  port :: PortID }
 
-setVoteMap, setAckMap :: KVSSetter (KVMap Int)
-setVoteMap v s = s { voteMap = v }
-setAckMap a s = s { ackMap = a }
-
 instance Show (MasterState) where
-  show (MasterState skt _ cfg voteMap ackMap timeoutMap) = 
-    show skt ++ show cfg ++ show voteMap ++ show ackMap ++ show timeoutMap
+  show (MasterState skt _ cfg txs) = 
+    show skt ++ show cfg ++ show txs
+
+instance Show (TX) where
+  show (TX state resp time message) = show state ++ show resp ++ show time ++ show message
+
+instance Show (TXState) where show s = case s of
+                                VOTE -> "Vote"
+                                ACK -> "ACK"
+                                RESPONSE -> "RESPONSE"
 
 -- Entry Point
 main :: IO ()
@@ -73,7 +86,7 @@ main = Lib.parseArguments >>= \args -> case args of
   Nothing -> Lib.printUsage -- an error occured 
   Just c -> do
     ms <- MasterState <$> listenOn (Lib.masterPortId c) <*> newChan
-    execMState initMaster $ ms c Map.empty Map.empty Map.empty
+    execMState initMaster $ ms c Map.empty
     return ()
 
 -- Initialization for Master Node
@@ -105,16 +118,20 @@ processMessage (KVVote _ _ VoteAbort _) = undefined
 --TODO, when receive an abort send an abort to everyone.
 
 processMessage (KVVote tid sid VoteReady request) = do
-  addToState tid sid voteMap setVoteMap
-  commit <- isComplete tid voteMap
-  timeout <- timedOut tid voteMap
+  slaveResponded tid sid
+  commit <- isComplete tid
+  timeout <- timedOut tid
+
+  when (commit || timeout) $ modifyM_ $ \s -> do
+    let tx = lookupTX tid s    
+    updateTX tid (tx { responded = S.empty, txState = ACK }) s
 
   if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
   else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
 
 processMessage kvMsg@(KVResponse tid sid _) = do
-  addToState tid sid ackMap setAckMap
-  complete <- isComplete tid ackMap
+  slaveResponded tid sid
+  complete <- isComplete tid
   when complete $ do
     sendMsgToClient kvMsg
     clearTX tid
@@ -124,15 +141,18 @@ processMessage kvMsg@(KVResponse tid sid _) = do
   -- complete <- ackComplete tid
   -- if complete then clearAcksTX tid else return ()
 
-processMessage kvMsg@(KVRequest txn_id req) = do
+processMessage kvMsg@(KVRequest tid req) = do
   now <- liftIO U.currentTimeInt
+  let txstate = case req of
+        GetReq _ _ -> RESPONSE
+        PutReq _ _ _ -> VOTE
   --Communicating with shard for the first time, keep track of this in the timeout map.
-  modifyM_ $ \s -> s { timeoutMap = Map.insert txn_id (now, kvMsg) (timeoutMap s) }
+  modifyM_ $ \s -> addTX tid (TX txstate S.empty now kvMsg) s
   sendMsgToRing kvMsg
 
 processMessage (KVAck tid (Just sid) maybeSuccess) = do
-  addToState tid sid ackMap $ \a s -> s { ackMap = a }
-  complete <- isComplete tid ackMap
+  slaveResponded tid sid
+  complete <- isComplete tid
   when complete $ do
     clearTX tid
     sendMsgToClient $ KVAck tid Nothing maybeSuccess
@@ -153,51 +173,64 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
 
 processMessage _ = undefined
 
+addTX :: KVTxnId -> TX -> MasterState -> MasterState
+addTX tid tx s = s { txs = Map.insert tid tx (txs s) }
+
+lookupTX :: KVTxnId -> MasterState -> TX
+lookupTX tid s = fromJust (Map.lookup tid $ txs s)
+
+updateTX :: KVTxnId -> TX -> MasterState -> MasterState
+updateTX tid tx s = s { txs = Map.insert tid tx (txs s) }
+
+clearResponded :: KVTxnId -> MasterState -> MasterState
+clearResponded tid s = do
+  let tx = lookupTX tid s
+  updateTX tid (tx { responded = S.empty }) s
+
 timeoutThread :: MState MasterState IO ()
 timeoutThread = get >>= \s -> do 
 --  liftIO $ traceIO "Timing out! in timeout thread!"
-
+  -- TODO: timeout transactions individually
   now <- liftIO $ U.currentTimeInt
-  let tm = Map.toList $ timeoutMap s
+   -- mapM_ (\(txn_id,(ts,msg)) -> do
+   --         if (now - KVProtocol.kV_TIMEOUT >= ts)
+   --         then sendDecisionToRing (KVDecision txn_id DecisionAbort (request msg))
+   --         else liftIO $ return ()
+   --       ) Map.toList $ txs s
 
-  mapM_ (\(txn_id,(ts,msg)) -> do
-          if (now - KVProtocol.kV_TIMEOUT >= ts)
-          then sendDecisionToRing (KVDecision txn_id DecisionAbort (request msg))
-          else liftIO $ return ()
-        ) tm
+  mapM_ (\(tid, tx) -> do
+          if (now - KVProtocol.kV_TIMEOUT >= timeout tx)
+          then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
+          else return ()
+        ) $ Map.toList $ txs s
 
   liftIO $ threadDelay 10000000
   timeoutThread
 
-addToState :: Ord a => KVTxnId -> a -> KVSGetter (KVMap a) -> KVSSetter (KVMap a)
-           -> MState MasterState IO ()
-addToState tid val f update = modifyM_ $ \s -> do
-  let set = U.insertS val $ Map.lookup tid $ f s
-  update (Map.insert tid set $ f s) s
+slaveResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
+slaveResponded tid slvId = modifyM_ $ \s -> do  
+  let tx = lookupTX tid s
+  updateTX tid (tx { responded = S.insert slvId (responded tx) }) s
 
 -- todo: change bakc to Ord a => KVMap a later
-isComplete :: Ord a => KVTxnId -> KVSGetter (KVMap a) -> MState MasterState IO Bool
-isComplete tid f = get >>= \s -> do
-  let set = fromJust $ Map.lookup tid $ f s
-  return $ Set.size set == Prelude.length (Lib.slaveConfig $ cfg s)
+isComplete :: KVTxnId -> MState MasterState IO Bool
+isComplete tid = get >>= \s -> do
+  let tx = lookupTX tid s
+  return $ S.size (responded tx) == Prelude.length (Lib.slaveConfig $ cfg s)
 
-timedOut :: KVTxnId -> KVSGetter (KVMap a) -> MState MasterState IO Bool
-timedOut tid f = get >>= \s -> liftIO $ do
+timedOut :: KVTxnId -> MState MasterState IO Bool
+timedOut tid = get >>= \s -> liftIO $ do
+  let tx = lookupTX tid s
   now <- U.currentTimeInt
-  let (ts, _) = fromJust $ Map.lookup tid (timeoutMap s)
-  return $ now - KVProtocol.kV_TIMEOUT >= ts
+  return $ now - KVProtocol.kV_TIMEOUT >= timeout tx
 
 clearTX :: KVTxnId -> MState MasterState IO ()
-clearTX tid = get >>= \s -> do
-  put $ s { ackMap = Map.delete tid $ ackMap s, 
-            voteMap = Map.delete tid $ voteMap s,
-            timeoutMap = Map.delete tid $ timeoutMap s }
-  liftIO $ traceIO $ "cleared txid" ++ show tid
+clearTX tid = modifyM_ $ \s -> s { txs = Map.delete tid $ txs s }
 
 sendDecisionToRing :: KVMessage -> MState MasterState IO ()
-sendDecisionToRing msg@(KVDecision txn_id decision req) = do
-  -- Note: this should not already exist in map
-  modifyM_ $ \s -> s { ackMap = Map.insert txn_id Set.empty (ackMap s) }
+sendDecisionToRing msg@(KVDecision tid decision req) = do
+  -- Note: this should not already exist in map TODO?
+  -- modifyM_ $ \s -> clearResponded tid s
   shard <- consistentHashing msg
   mapM_ (\n -> forkM_ $ forwardToSlaveRetry n msg KVProtocol.kV_TIMEOUT) shard
 
@@ -213,8 +246,8 @@ sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToSla
 forwardToSlaveRetry :: KVSlave -> KVMessage -> Int -> MState MasterState IO ()
 forwardToSlaveRetry slv msg timeout = get >>= \s -> do
   -- We can stop resending if we've received an ack from the node
-  let forwardNeeded = not . Set.member (slvID slv) <$> Map.lookup (txn_id msg) (ackMap s)
-  when (fromMaybe False forwardNeeded) $ do
+  let forwardNeeded = not . S.member (slvID slv) $ responded $ lookupTX (txn_id msg) s
+  when forwardNeeded $ do
     forwardToSlave slv msg
     -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
     liftIO $ threadDelay $ timeout * 10000
@@ -237,7 +270,9 @@ tryConnect slv msg = do
     Left (e :: SomeException) -> do
       -- the connection time out, meaning that the transaction should be aborted.
       -- mark this in the timeout map so the timeout thread behaves appropriately.
-      modifyM_ $ \s -> s { timeoutMap = Map.insert (txn_id msg) (0,msg) (timeoutMap s) }
+      modifyM_ $ \s -> do
+        let tx = lookupTX (txn_id msg) s
+        updateTX (txn_id msg) (tx { timeout = 0 } ) s
       return Nothing
 
     Right h -> liftIO $ return (Just h)
