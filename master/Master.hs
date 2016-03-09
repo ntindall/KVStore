@@ -185,21 +185,19 @@ timeoutThread = get >>= \s -> do
    --         else liftIO $ return ()
    --       ) Map.toList $ txs s 
   now <- liftIO $ U.currentTimeInt
-  timedOutTxns <- filterM (\(tid, tx) -> 
-                            if (now - KVProtocol.kV_TIMEOUT >= timeout tx) 
-                            then do
-                              if (txState tx == VOTE)
-                              then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
-                              else 
-                                when (txState tx == RESPONSE) $ sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout")))
-                              return True
-                            else 
-                              return False
-                          ) $ Map.toList $ txs s
+  mapM_ (\(tid, tx) ->
+          if (now - KVProtocol.kV_TIMEOUT >= timeout tx) 
+          then do
+            if (txState tx == ACK)
+              then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
+            else sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout"))) -- else is VOTE or RESPONSE
+          else return ()
+        ) $ Map.toList $ txs s
   --todo, may need to put this into modifyM_ 
-  mapM clearTX (L.map fst timedOutTxns)
 
-  liftIO $ threadDelay 10000000
+  -- mapM clearTX (L.map fst timedOutTxns)
+
+  liftIO $ threadDelay 100000
   timeoutThread
 
 slaveResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
@@ -247,11 +245,16 @@ clearResponded tid s = do
   if isJust tx then updateTX tid (tx' { responded = S.empty }) s else s
 
 sendDecisionToRing :: KVMessage -> MState MasterState IO ()
-sendDecisionToRing msg@(KVDecision tid decision req) = do
+sendDecisionToRing msg@(KVDecision tid decision req) = get >>= \s -> do
   -- Note: this should not already exist in map TODO?
   -- modifyM_ $ \s -> clearResponded tid s
   shard <- consistentHashing msg
-  mapM_ (\n -> forkM_ $ forwardToSlaveRetry n msg KVProtocol.kV_TIMEOUT) shard
+--  mapM_ (\n -> forkM_ $ forwardToSlaveRetry n msg KVProtocol.kV_TIMEOUT) shard
+  let tx = lookupTX (txn_id msg) s
+      tx' = fromJust tx
+
+  if isJust tx then mapM_ (\n -> if (not . S.member (slvID n) $ responded $ tx') then forkM_ $ forwardToSlave n msg else return ()) shard
+  else return ()
 
 --TODO: something smarter
 consistentHashing :: KVMessage -> MState MasterState IO [KVSlave]
@@ -281,6 +284,7 @@ forwardToSlaveRetry slv msg timeout = get >>= \s -> do
 
 forwardToSlave :: KVSlave -> KVMessage -> MState MasterState IO ()
 forwardToSlave slv msg = do
+  traceShowM "forwardtoslave called"
   result <- tryConnect slv msg
   case result of
     Just h -> do
