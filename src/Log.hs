@@ -20,6 +20,8 @@ import Debug.Trace
 
 import Control.Monad
 
+import System.FileLock
+
 import qualified Utils
 
 type KeyValueMapWithState = Map.Map B.ByteString ((KVKey, KVVal, B.ByteString), Bool)
@@ -40,7 +42,9 @@ writeReady filename msg = do
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "READY", C8.pack $ show field_txn, key, val, C8.pack $ show field_issuedUTC]) `C8.append` (C8.pack "\n")
 
+  l <- lockFile filename Exclusive
   B.appendFile filename logEntry
+  unlockFile l 
 
 
 writeCommit :: FilePath -> KVMessage -> IO()
@@ -51,7 +55,9 @@ writeCommit filename msg = do
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "COMMIT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
 
+  l <- lockFile filename Exclusive
   B.appendFile filename logEntry
+  unlockFile l 
 
 writeAbort :: FilePath -> KVMessage -> IO()
 writeAbort filename msg = do
@@ -61,7 +67,9 @@ writeAbort filename msg = do
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "ABORT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
 
+  l <- lockFile filename Exclusive
   B.appendFile filename logEntry
+  unlockFile l 
 
 
 --rebuild the in memory store using the log, redoing all committed actions that

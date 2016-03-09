@@ -5,6 +5,7 @@ module Main where
 import Lib
 import System.IO as IO
 import System.Directory as DIR
+import System.FileLock
 import Network
 import Data.Maybe
 import Data.List as List
@@ -45,6 +46,7 @@ data SlaveState = SlaveState {
                 , cfg :: Lib.Config
                 , store :: Map.Map KVKey (KVVal, Int)
                 , unresolvedTxns :: Map.Map KVTxnId KVMessage
+                , fileLock :: FileLock
                 }
  --  deriving (Show)
 
@@ -65,6 +67,8 @@ runKVSlave :: MState SlaveState IO ()
 runKVSlave = get >>= \s -> do 
   c <- liftIO newChan
 
+  traceShowM $ "[!] REBUILDING... "
+
   let config = cfg s
       slaveId = fromJust $ Lib.slaveNumber config
       (slaveName, slavePortId) = Lib.slaveConfig config !! slaveId
@@ -76,14 +80,23 @@ runKVSlave = get >>= \s -> do
     store <- liftIO $ liftM (Map.fromList . Utils.readKVList) $ B.readFile $ persistentFileName slaveId
     (recoveredTxns, store') <- liftIO $ LOG.rebuild (LOG.persistentLogName slaveId) store
 
-    liftIO $ B.writeFile ((persistentFileName slaveId) ++ ".bak") (Utils.writeKVList $ Map.toList store')
+    let persistentFile = (persistentFileName slaveId)
+        bakFile = persistentFile ++ ".bak"
+
+    l1 <- liftIO $ lockFile persistentFile Exclusive
+    l2 <- liftIO $ lockFile bakFile Exclusive
+
+    liftIO $ B.writeFile bakFile (Utils.writeKVList $ Map.toList store')
     --clear the log file
     --B.writeFile (LOG.persistentLogName slaveId) B.empty
     --TODO: don't clear log until all of these recoveredTxns ahve been acked (need either separate map or tuple).
     --overwrite the old store
-    liftIO $ DIR.renameFile ((persistentFileName slaveId) ++ ".bak") (persistentFileName slaveId)
+    liftIO $ DIR.renameFile bakFile persistentFile
 
     modifyM_ $ \s -> s { socket = skt, channel = c, store = store', unresolvedTxns = recoveredTxns }
+
+    liftIO $ unlockFile l1
+    liftIO $ unlockFile l2
   else do
    -- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
     modifyM_ $ \s -> s { socket = skt, channel = c, store = Map.empty }
@@ -91,6 +104,8 @@ runKVSlave = get >>= \s -> do
 
   forkM_ sendResponses
   forkM_ checkpoint
+
+  traceShowM $ "[!] DONE REBUILDING... "
 
   processMessages
 
@@ -100,11 +115,9 @@ checkpoint = get >>= \s -> do
     let config = cfg s
         mySlaveId = fromJust (Lib.slaveNumber config)
 
-    --we need a file lock HERE TODO DODOODODODo
+    --no lock is needed, only this thread writes to this file
     B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
-    --release filelock
 
-  -- sleep for 2 seconds
   liftIO $ threadDelay 2000000
   checkpoint
 
@@ -224,7 +237,7 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
     else --nothing to do, but need to ACK to let master know we are back alive
       liftIO $ do
         h <- KVProtocol.connectToMaster config
-        KVProtocol.sendMessage h (KVAck tid (Just mySlaveId) (Just "Transaction Aborted"))
+        KVProtocol.sendMessage h (KVAck tid (Just mySlaveId) (Just "Duplicate DECISION message"))
         IO.hClose h
 
 handleResponse = undefined

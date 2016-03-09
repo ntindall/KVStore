@@ -25,6 +25,7 @@ library
                      , directory
                      , rainbow
                      , MissingH
+                     , filelock
   default-language:    Haskell2010
 
 executable kvstore-master
@@ -58,6 +59,7 @@ executable kvstore-slave
                      , MissingH
                      , probable
                      , unix
+                     , filelock
   default-language:    Haskell2010
 
 executable kvstore-client

@@ -114,9 +114,8 @@ processMessage :: KVMessage -> MState MasterState IO ()
 processMessage (KVVote _ _ VoteAbort _) = undefined
 --TODO, when receive an abort send an abort to everyone.
 
-processMessage (KVVote tid sid VoteReady request) = do
-  exists <- get >>= \s -> return $ containsTX tid s
-
+processMessage (KVVote tid sid VoteReady request) = get >>= \s -> do
+  let exists = containsTX tid s
   when exists $ do
     slaveResponded tid sid
     commit <- isComplete tid
@@ -129,9 +128,8 @@ processMessage (KVVote tid sid VoteReady request) = do
     if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
     else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
 
-processMessage kvMsg@(KVResponse tid sid _) = do
-  exists <- get >>= \s -> return $ containsTX tid s
-
+processMessage kvMsg@(KVResponse tid sid _) = get >>= \s -> do
+  let exists = containsTX tid s
   when exists $ do
     slaveResponded tid sid
     --complete <- isComplete tid
@@ -155,12 +153,15 @@ processMessage kvMsg@(KVRequest tid req) = do
   modifyM_ $ \s -> addTX tid (TX txstate S.empty now kvMsg) s
   sendMsgToRing kvMsg
 
-processMessage (KVAck tid (Just sid) maybeSuccess) = do
-  slaveResponded tid sid
-  complete <- isComplete tid
-  when complete $ do
-    clearTX tid
-    sendMsgToClient $ KVAck tid Nothing maybeSuccess
+processMessage (KVAck tid (Just sid) maybeSuccess) = get >>= \s -> do
+  let exists = containsTX tid s
+  
+  when exists $ do
+    slaveResponded tid sid
+    complete <- isComplete tid
+    when complete $ do
+      clearTX tid
+      sendMsgToClient $ KVAck tid Nothing maybeSuccess
 
 processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
   let cfgTuple = (hostName, PortNumber $ toEnum portId)
@@ -178,26 +179,9 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
 
 processMessage _ = undefined
 
-addTX :: KVTxnId -> TX -> MasterState -> MasterState
-addTX tid tx s = s { txs = Map.insert tid tx (txs s) }
-
-containsTX :: KVTxnId -> MasterState -> Bool
-containsTX tid s = if isNothing (Map.lookup tid $ txs s) then False else True
-
-lookupTX :: KVTxnId -> MasterState -> TX
-lookupTX tid s = fromJust (Map.lookup tid $ txs s)
-
--- updateTX, mutates the state, must be called within a mutateM_ block
-updateTX :: KVTxnId -> TX -> MasterState -> MasterState
-updateTX tid tx s = s { txs = Map.insert tid tx (txs s) }
-
-clearResponded :: KVTxnId -> MasterState -> MasterState
-clearResponded tid s = do
-  let tx = lookupTX tid s
-  updateTX tid (tx { responded = S.empty }) s
-
 timeoutThread :: MState MasterState IO ()
 timeoutThread = get >>= \s -> do
+  traceShowM $ "[!] TIMING OUT..."
 --  liftIO $ traceIO "Timing out! in timeout thread!"
   -- TODO: timeout transactions individually
    -- mapM_ (\(txn_id,(ts,msg)) -> do
@@ -211,8 +195,8 @@ timeoutThread = get >>= \s -> do
                             then do
                               if (txState tx == VOTE)
                               then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
-                              else
-                                sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout")))
+                              else 
+                                when (txState tx == RESPONSE) $ sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout")))
                               return True
                             else 
                               return False
@@ -243,6 +227,24 @@ timedOut tid = get >>= \s -> liftIO $ do
 clearTX :: KVTxnId -> MState MasterState IO ()
 clearTX tid = modifyM_ $ \s -> s { txs = Map.delete tid $ txs s }
 
+addTX :: KVTxnId -> TX -> MasterState -> MasterState
+addTX tid tx s = s { txs = Map.insert tid tx (txs s) }
+
+containsTX :: KVTxnId -> MasterState -> Bool
+containsTX tid s = if isNothing (Map.lookup tid $ txs s) then False else True
+
+lookupTX :: KVTxnId -> MasterState -> TX
+lookupTX tid s = fromJust (Map.lookup tid $ txs s)
+
+-- updateTX, mutates the state, must be called within a mutateM_ block
+updateTX :: KVTxnId -> TX -> MasterState -> MasterState
+updateTX tid tx s = s { txs = Map.insert tid tx (txs s) }
+
+clearResponded :: KVTxnId -> MasterState -> MasterState
+clearResponded tid s = do
+  let tx = lookupTX tid s
+  updateTX tid (tx { responded = S.empty }) s
+
 sendDecisionToRing :: KVMessage -> MState MasterState IO ()
 sendDecisionToRing msg@(KVDecision tid decision req) = do
   -- Note: this should not already exist in map TODO?
@@ -269,7 +271,7 @@ forwardToSlaveRetry slv msg timeout = get >>= \s -> do
     when forwardNeeded $ do
       forwardToSlave slv msg
       -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
-      liftIO $ threadDelay $ timeout * 10000
+      liftIO $ threadDelay $ timeout * 10
       forwardToSlaveRetry slv msg (timeout * 2)
 
 forwardToSlave :: KVSlave -> KVMessage -> MState MasterState IO ()
