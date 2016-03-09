@@ -7,7 +7,7 @@ import System.IO as IO
 import Network
 
 import Data.ByteString.Lazy as B
-import Data.ByteString.Char8 as C8
+import Data.ByteString.Lazy.Char8 as C8
 import Data.Tuple.Utils
 
 import qualified Data.List as L
@@ -130,9 +130,14 @@ processMessage (KVVote tid sid VoteReady request) = do
     else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
 
 processMessage kvMsg@(KVResponse tid sid _) = do
-  slaveResponded tid sid
-  complete <- isComplete tid
-  when complete $ do
+  exists <- get >>= \s -> return $ containsTX tid s
+
+  when exists $ do
+    slaveResponded tid sid
+    --complete <- isComplete tid
+    --when complete $ do
+
+    --forward first response to client, delete from map
     sendMsgToClient kvMsg
     clearTX tid
 
@@ -144,8 +149,8 @@ processMessage kvMsg@(KVResponse tid sid _) = do
 processMessage kvMsg@(KVRequest tid req) = do
   now <- liftIO U.currentTimeInt
   let txstate = case req of
-        GetReq _ _ -> RESPONSE
-        PutReq _ _ _ -> VOTE
+        GetReq{} -> RESPONSE
+        PutReq{} -> VOTE
   --Communicating with shard for the first time, keep track of this in the timeout map.
   modifyM_ $ \s -> addTX tid (TX txstate S.empty now kvMsg) s
   sendMsgToRing kvMsg
@@ -180,7 +185,7 @@ containsTX :: KVTxnId -> MasterState -> Bool
 containsTX tid s = if isNothing (Map.lookup tid $ txs s) then False else True
 
 lookupTX :: KVTxnId -> MasterState -> TX
-lookupTX tid s = traceShow "looking up" $ fromJust (Map.lookup tid $ txs s)
+lookupTX tid s = fromJust (Map.lookup tid $ txs s)
 
 -- updateTX, mutates the state, must be called within a mutateM_ block
 updateTX :: KVTxnId -> TX -> MasterState -> MasterState
@@ -192,21 +197,28 @@ clearResponded tid s = do
   updateTX tid (tx { responded = S.empty }) s
 
 timeoutThread :: MState MasterState IO ()
-timeoutThread = get >>= \s -> do 
+timeoutThread = get >>= \s -> do
 --  liftIO $ traceIO "Timing out! in timeout thread!"
   -- TODO: timeout transactions individually
-  now <- liftIO $ U.currentTimeInt
    -- mapM_ (\(txn_id,(ts,msg)) -> do
    --         if (now - KVProtocol.kV_TIMEOUT >= ts)
    --         then sendDecisionToRing (KVDecision txn_id DecisionAbort (request msg))
    --         else liftIO $ return ()
-   --       ) Map.toList $ txs s
-
-  mapM_ (\(tid, tx) -> do
-          if (now - KVProtocol.kV_TIMEOUT >= timeout tx) && (txState tx == VOTE)
-          then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
-          else return ()
-        ) $ Map.toList $ txs s
+   --       ) Map.toList $ txs s 
+  now <- liftIO $ U.currentTimeInt
+  timedOutTxns <- filterM (\(tid, tx) -> 
+                            if (now - KVProtocol.kV_TIMEOUT >= timeout tx) 
+                            then do
+                              if (txState tx == VOTE)
+                              then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
+                              else
+                                sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout")))
+                              return True
+                            else 
+                              return False
+                          ) $ Map.toList $ txs s
+  --todo, may need to put this into modifyM_ 
+  mapM clearTX (L.map fst timedOutTxns)
 
   liftIO $ threadDelay 10000000
   timeoutThread
@@ -219,13 +231,11 @@ slaveResponded tid slvId = modifyM_ $ \s -> do
 -- todo: change bakc to Ord a => KVMap a later
 isComplete :: KVTxnId -> MState MasterState IO Bool
 isComplete tid = get >>= \s -> do
-  traceShowM $ "testing for completeness"
   let tx = lookupTX tid s
   return $ S.size (responded tx) == Prelude.length (Lib.slaveConfig $ cfg s)
 
 timedOut :: KVTxnId -> MState MasterState IO Bool
 timedOut tid = get >>= \s -> liftIO $ do
-  traceShowM $ "testing for timeout"
   let tx = lookupTX tid s
   now <- U.currentTimeInt
   return $ now - KVProtocol.kV_TIMEOUT >= timeout tx
@@ -291,10 +301,10 @@ sendMsgToClient msg = get >>= \s -> liftIO $ do
   let clientId = fst (txn_id msg)
       clientCfgList = Lib.clientConfig $ cfg s
 
-  traceShowM $ "sending"
-
   if (clientId > Prelude.length clientCfgList - 1) then return ()
   else do
+    -- TODO, what if client disconnected? need to add timeout logic here (or just stop if
+    -- exception is thrown while trying to connectTo the client.
     let clientCfg = Lib.clientConfig (cfg s) !! clientId
     clientH <- uncurry connectTo clientCfg
     KVProtocol.sendMessage clientH msg
