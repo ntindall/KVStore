@@ -1,3 +1,4 @@
+
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
@@ -114,30 +115,27 @@ processMessage :: KVMessage -> MState MasterState IO ()
 processMessage (KVVote _ _ VoteAbort _) = undefined
 --TODO, when receive an abort send an abort to everyone.
 
-processMessage (KVVote tid sid VoteReady request) = get >>= \s -> do
-  let exists = containsTX tid s
-  when exists $ do
-    slaveResponded tid sid
-    commit <- isComplete tid
-    timeout <- timedOut tid
+processMessage (KVVote tid sid VoteReady request) = do
+  slaveResponded tid sid
+  commit <- isComplete tid
+  timeout <- timedOut tid
 
-    when (commit || timeout) $ modifyM_ $ \s -> do
-      let tx = lookupTX tid s    
-      updateTX tid (tx { responded = S.empty, txState = ACK }) s
+  when (commit || timeout) $ modifyM_ $ \s -> do
+    let tx = lookupTX tid s
+        tx' = fromJust tx
+    if (isJust tx) then updateTX tid (tx' { responded = S.empty, txState = ACK }) s else s
 
-    if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
-    else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
+  if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
+  else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
 
-processMessage kvMsg@(KVResponse tid sid _) = get >>= \s -> do
-  let exists = containsTX tid s
-  when exists $ do
-    slaveResponded tid sid
-    --complete <- isComplete tid
-    --when complete $ do
+processMessage kvMsg@(KVResponse tid sid _) = do
+  slaveResponded tid sid
+  --complete <- isComplete tid
+  --when complete $ do
 
-    --forward first response to client, delete from map
-    sendMsgToClient kvMsg
-    clearTX tid
+  --forward first response to client, delete from map
+  sendMsgToClient kvMsg
+  clearTX tid
 
   -- TODO: add timeout for get reqs
   -- addAck tid sid
@@ -153,15 +151,12 @@ processMessage kvMsg@(KVRequest tid req) = do
   modifyM_ $ \s -> addTX tid (TX txstate S.empty now kvMsg) s
   sendMsgToRing kvMsg
 
-processMessage (KVAck tid (Just sid) maybeSuccess) = get >>= \s -> do
-  let exists = containsTX tid s
-  
-  when exists $ do
-    slaveResponded tid sid
-    complete <- isComplete tid
-    when complete $ do
-      clearTX tid
-      sendMsgToClient $ KVAck tid Nothing maybeSuccess
+processMessage (KVAck tid (Just sid) maybeSuccess) = do  
+  slaveResponded tid sid
+  complete <- isComplete tid
+  when complete $ do
+    clearTX tid
+    sendMsgToClient $ KVAck tid Nothing maybeSuccess
 
 processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
   let cfgTuple = (hostName, PortNumber $ toEnum portId)
@@ -210,19 +205,24 @@ timeoutThread = get >>= \s -> do
 slaveResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
 slaveResponded tid slvId = modifyM_ $ \s -> do
   let tx = lookupTX tid s
-  updateTX tid (tx { responded = S.insert slvId (responded tx) }) s
+      tx' = fromJust tx
+  if isJust tx then updateTX tid (tx' { responded = S.insert slvId (responded tx') }) s else s 
 
 -- todo: change bakc to Ord a => KVMap a later
 isComplete :: KVTxnId -> MState MasterState IO Bool
 isComplete tid = get >>= \s -> do
   let tx = lookupTX tid s
-  return $ S.size (responded tx) == Prelude.length (Lib.slaveConfig $ cfg s)
+      tx' = fromJust tx
+  if isJust tx then return $ S.size (responded tx') == Prelude.length (Lib.slaveConfig $ cfg s) else return False
 
 timedOut :: KVTxnId -> MState MasterState IO Bool
 timedOut tid = get >>= \s -> liftIO $ do
   let tx = lookupTX tid s
+      tx' = fromJust tx
   now <- U.currentTimeInt
-  return $ now - KVProtocol.kV_TIMEOUT >= timeout tx
+  if isJust tx
+  then return $ now - KVProtocol.kV_TIMEOUT >= timeout tx'
+  else return False
 
 clearTX :: KVTxnId -> MState MasterState IO ()
 clearTX tid = modifyM_ $ \s -> s { txs = Map.delete tid $ txs s }
@@ -230,11 +230,11 @@ clearTX tid = modifyM_ $ \s -> s { txs = Map.delete tid $ txs s }
 addTX :: KVTxnId -> TX -> MasterState -> MasterState
 addTX tid tx s = s { txs = Map.insert tid tx (txs s) }
 
-containsTX :: KVTxnId -> MasterState -> Bool
-containsTX tid s = if isNothing (Map.lookup tid $ txs s) then False else True
+-- containsTX :: KVTxnId -> MasterState -> Bool
+-- containsTX tid s = if isNothing (Map.lookup tid $ txs s) then False else True
 
-lookupTX :: KVTxnId -> MasterState -> TX
-lookupTX tid s = fromJust (Map.lookup tid $ txs s)
+lookupTX :: KVTxnId -> MasterState -> Maybe TX
+lookupTX tid s = Map.lookup tid $ txs s
 
 -- updateTX, mutates the state, must be called within a mutateM_ block
 updateTX :: KVTxnId -> TX -> MasterState -> MasterState
@@ -243,7 +243,8 @@ updateTX tid tx s = s { txs = Map.insert tid tx (txs s) }
 clearResponded :: KVTxnId -> MasterState -> MasterState
 clearResponded tid s = do
   let tx = lookupTX tid s
-  updateTX tid (tx { responded = S.empty }) s
+      tx' = fromJust tx
+  if isJust tx then updateTX tid (tx' { responded = S.empty }) s else s
 
 sendDecisionToRing :: KVMessage -> MState MasterState IO ()
 sendDecisionToRing msg@(KVDecision tid decision req) = do
@@ -264,15 +265,19 @@ sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToSla
 forwardToSlaveRetry :: KVSlave -> KVMessage -> Int -> MState MasterState IO ()
 forwardToSlaveRetry slv msg timeout = get >>= \s -> do
   -- We can stop resending if we've received an ack from the node
-
-  let exists = containsTX (txn_id msg) s
-  when exists $ do 
-    let forwardNeeded = not . S.member (slvID slv) $ responded $ lookupTX (txn_id msg) s
-    when forwardNeeded $ do
-      forwardToSlave slv msg
-      -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
-      liftIO $ threadDelay $ timeout * 10
-      forwardToSlaveRetry slv msg (timeout * 2)
+  let tx = lookupTX (txn_id msg) s
+      tx' = fromJust tx
+      forwardNeeded = not . S.member (slvID slv) $ responded $ tx'
+  if isJust tx && forwardNeeded then do
+    forwardToSlave slv msg
+    -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
+    traceShowM $ "sleep for " ++ (show timeout)
+    liftIO $ threadDelay $ timeout
+    traceShowM "recurse forwardtoslave"
+    forwardToSlaveRetry slv msg (timeout * 2)
+  else do
+    traceShowM "tx doesn't exist"
+    return ()
 
 forwardToSlave :: KVSlave -> KVMessage -> MState MasterState IO ()
 forwardToSlave slv msg = do
@@ -282,7 +287,9 @@ forwardToSlave slv msg = do
       liftIO $ do
         KVProtocol.sendMessage h msg
         hClose h
-    Nothing -> liftIO $ return ()
+    Nothing -> do
+      traceShowM "unable to connect"      
+      liftIO $ return ()
 
 tryConnect :: KVSlave -> KVMessage -> MState MasterState IO (Maybe Handle)
 tryConnect slv msg = do
@@ -293,7 +300,8 @@ tryConnect slv msg = do
       -- mark this in the timeout map so the timeout thread behaves appropriately.
       modifyM_ $ \s -> do
         let tx = lookupTX (txn_id msg) s
-        updateTX (txn_id msg) (tx { timeout = 0 } ) s
+            tx' = fromJust tx
+        if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
       return Nothing
 
     Right h -> liftIO $ return (Just h)
