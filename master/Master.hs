@@ -61,26 +61,21 @@ data MasterState = MasterState {
                 }
                    
 data TXState = VOTE | ACK | RESPONSE
+  deriving (Show, Eq, Ord)
+
 data TX = TX {
   txState :: TXState,
   responded :: S.Set SlvId,
   timeout :: Time,
   message :: KVMessage
 }
+ deriving (Show)
 
 data KVSlave = KVSlave { slvID :: Int , host :: HostName,  port :: PortID }
 
 instance Show (MasterState) where
   show (MasterState skt _ cfg txs) = 
     show skt ++ show cfg ++ show txs
-
-instance Show (TX) where
-  show (TX state resp time message) = show state ++ show resp ++ show time ++ show message
-
-instance Show (TXState) where show s = case s of
-                                VOTE -> "Vote"
-                                ACK -> "ACK"
-                                RESPONSE -> "RESPONSE"
 
 -- Entry Point
 main :: IO ()
@@ -120,16 +115,19 @@ processMessage (KVVote _ _ VoteAbort _) = undefined
 --TODO, when receive an abort send an abort to everyone.
 
 processMessage (KVVote tid sid VoteReady request) = do
-  slaveResponded tid sid
-  commit <- isComplete tid
-  timeout <- timedOut tid
+  exists <- get >>= \s -> return $ containsTX tid s
 
-  when (commit || timeout) $ modifyM_ $ \s -> do
-    let tx = lookupTX tid s    
-    updateTX tid (tx { responded = S.empty, txState = ACK }) s
+  when exists $ do
+    slaveResponded tid sid
+    commit <- isComplete tid
+    timeout <- timedOut tid
 
-  if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
-  else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
+    when (commit || timeout) $ modifyM_ $ \s -> do
+      let tx = lookupTX tid s    
+      updateTX tid (tx { responded = S.empty, txState = ACK }) s
+
+    if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
+    else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
 
 processMessage kvMsg@(KVResponse tid sid _) = do
   slaveResponded tid sid
@@ -178,9 +176,13 @@ processMessage _ = undefined
 addTX :: KVTxnId -> TX -> MasterState -> MasterState
 addTX tid tx s = s { txs = Map.insert tid tx (txs s) }
 
-lookupTX :: KVTxnId -> MasterState -> TX
-lookupTX tid s = fromJust (Map.lookup tid $ txs s)
+containsTX :: KVTxnId -> MasterState -> Bool
+containsTX tid s = if isNothing (Map.lookup tid $ txs s) then False else True
 
+lookupTX :: KVTxnId -> MasterState -> TX
+lookupTX tid s = traceShow "looking up" $ fromJust (Map.lookup tid $ txs s)
+
+-- updateTX, mutates the state, must be called within a mutateM_ block
 updateTX :: KVTxnId -> TX -> MasterState -> MasterState
 updateTX tid tx s = s { txs = Map.insert tid tx (txs s) }
 
@@ -201,7 +203,7 @@ timeoutThread = get >>= \s -> do
    --       ) Map.toList $ txs s
 
   mapM_ (\(tid, tx) -> do
-          if (now - KVProtocol.kV_TIMEOUT >= timeout tx)
+          if (now - KVProtocol.kV_TIMEOUT >= timeout tx) && (txState tx == VOTE)
           then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
           else return ()
         ) $ Map.toList $ txs s
@@ -210,18 +212,20 @@ timeoutThread = get >>= \s -> do
   timeoutThread
 
 slaveResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
-slaveResponded tid slvId = modifyM_ $ \s -> do  
+slaveResponded tid slvId = modifyM_ $ \s -> do
   let tx = lookupTX tid s
   updateTX tid (tx { responded = S.insert slvId (responded tx) }) s
 
 -- todo: change bakc to Ord a => KVMap a later
 isComplete :: KVTxnId -> MState MasterState IO Bool
 isComplete tid = get >>= \s -> do
+  traceShowM $ "testing for completeness"
   let tx = lookupTX tid s
   return $ S.size (responded tx) == Prelude.length (Lib.slaveConfig $ cfg s)
 
 timedOut :: KVTxnId -> MState MasterState IO Bool
 timedOut tid = get >>= \s -> liftIO $ do
+  traceShowM $ "testing for timeout"
   let tx = lookupTX tid s
   now <- U.currentTimeInt
   return $ now - KVProtocol.kV_TIMEOUT >= timeout tx
@@ -248,12 +252,15 @@ sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToSla
 forwardToSlaveRetry :: KVSlave -> KVMessage -> Int -> MState MasterState IO ()
 forwardToSlaveRetry slv msg timeout = get >>= \s -> do
   -- We can stop resending if we've received an ack from the node
-  let forwardNeeded = not . S.member (slvID slv) $ responded $ lookupTX (txn_id msg) s
-  when forwardNeeded $ do
-    forwardToSlave slv msg
-    -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
-    liftIO $ threadDelay $ timeout * 10000
-    forwardToSlaveRetry slv msg (timeout * 2)
+
+  let exists = containsTX (txn_id msg) s
+  when exists $ do 
+    let forwardNeeded = not . S.member (slvID slv) $ responded $ lookupTX (txn_id msg) s
+    when forwardNeeded $ do
+      forwardToSlave slv msg
+      -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
+      liftIO $ threadDelay $ timeout * 10000
+      forwardToSlaveRetry slv msg (timeout * 2)
 
 forwardToSlave :: KVSlave -> KVMessage -> MState MasterState IO ()
 forwardToSlave slv msg = do
@@ -283,6 +290,8 @@ sendMsgToClient :: KVMessage -> MState MasterState IO ()
 sendMsgToClient msg = get >>= \s -> liftIO $ do
   let clientId = fst (txn_id msg)
       clientCfgList = Lib.clientConfig $ cfg s
+
+  traceShowM $ "sending"
 
   if (clientId > Prelude.length clientCfgList - 1) then return ()
   else do
