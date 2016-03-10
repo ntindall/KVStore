@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
@@ -6,7 +7,9 @@ import Lib
 import System.IO as IO
 import System.Directory as DIR
 import System.FileLock
-import Network
+import Network as NETWORK
+import Network.Socket as SOCKET
+import Network.BSD as BSD
 import Data.Maybe
 import Data.List as List
 import qualified Data.Map.Strict as Map
@@ -19,6 +22,7 @@ import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Monad.Reader
+import qualified Control.Monad.Catch as Catch
 import Control.Arrow as CA
 
 import Control.Monad
@@ -42,7 +46,7 @@ import System.FileLock
 type SlaveId = Int
 
 data SlaveState = SlaveState {
-                  socket :: Socket
+                  sock :: NETWORK.Socket
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
                 , store :: Map.Map KVKey (KVVal, Int)
@@ -54,6 +58,7 @@ data SlaveState = SlaveState {
 main :: IO ()
 main = do
   success <- Lib.parseArguments
+
   case success of
     Nothing     -> Lib.printUsage --an error occured
     Just config ->
@@ -61,12 +66,35 @@ main = do
       in if slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config)
          then Lib.printUsage --error
          else do
-           execMState runKVSlave $ SlaveState { cfg = config 
-                                              ,  store = Map.empty
-                                              ,  unresolvedTxns = Map.empty
-                                              ,  recoveredTxns = Map.empty 
-                                              }
-           return ()
+          let main_ = execMState runKVSlave $ SlaveState { cfg = config 
+                                                         ,  store = Map.empty
+                                                         ,  unresolvedTxns = Map.empty
+                                                         ,  recoveredTxns = Map.empty 
+                                                         } 
+              --install trap
+              handler = Catch (do
+                threadDelay 1000000
+                --need to release locks we may have acquired
+                unlockFile $ persistentFileName slaveId
+                unlockFile $ LOG.persistentLogName slaveId
+                main_ >>= \_ -> return ())
+          installHandler sigABRT handler Nothing
+          main_ >>= (\_ -> return ())
+
+listenOnPort :: PortNumber -> IO NETWORK.Socket
+listenOnPort port = do
+  proto <- BSD.getProtocolNumber "tcp"
+  bracketOnError
+    (SOCKET.socket AF_INET Stream proto)
+    SOCKET.sClose
+    (\sock -> do
+        SOCKET.setSocketOption sock ReuseAddr 1
+        SOCKET.setSocketOption sock ReusePort 1
+        SOCKET.bindSocket sock (SockAddrInet port iNADDR_ANY)
+        SOCKET.listen sock maxListenQueue
+        return sock
+    )
+
 
 runKVSlave :: MState SlaveState IO ()
 runKVSlave = get >>= \s -> do 
@@ -76,8 +104,8 @@ runKVSlave = get >>= \s -> do
 
   let config = cfg s
       slaveId = fromJust $ Lib.slaveNumber config
-      (slaveName, slavePortId) = Lib.slaveConfig config !! slaveId
-  skt <- liftIO $ listenOn slavePortId
+      (slaveName, slavePortId@(PortNumber portNum)) = Lib.slaveConfig config !! slaveId
+  skt <- liftIO $ listenOnPort portNum -- $ listenOn slavePortId
 
   fileExists <- liftIO $ DIR.doesFileExist (LOG.persistentLogName slaveId)
   if fileExists
@@ -98,13 +126,13 @@ runKVSlave = get >>= \s -> do
     --overwrite the old store
     liftIO $ DIR.renameFile bakFile persistentFile
 
-    modifyM_ $ \s -> s { socket = skt, channel = c, store = store', recoveredTxns = unackedTxns }
+    modifyM_ $ \s -> s { sock = skt, channel = c, store = store', recoveredTxns = unackedTxns }
 
     liftIO $ unlockFile l1
     liftIO $ unlockFile l2
   else do
    -- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
-    modifyM_ $ \s -> s { socket = skt, channel = c, store = Map.empty }
+    modifyM_ $ \s -> s { sock = skt, channel = c, store = Map.empty }
     return ()
   traceShowM $ "[!] DONE REBUILDING... "
 
@@ -128,6 +156,8 @@ checkpoint = get >>= \s -> do
        --and log being flushed.
       l <- lockFile (LOG.persistentLogName mySlaveId) Exclusive
 
+
+
       --no lock is needed, only this thread writes to this file
       B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
       LOG.flush (LOG.persistentLogName mySlaveId) 
@@ -141,17 +171,20 @@ checkpoint = get >>= \s -> do
 
 processMessages :: MState SlaveState IO ()
 processMessages = get >>= \s -> do
-  let sock = socket s
+  let sock' = sock s
       c = channel s
 
-  liftIO $ bracket (accept sock)
-                   (\(h,_,_) -> hClose h)
-                   (\(h, hostName, portNumber) -> liftIO $ do
-                     msg <- KVProtocol.getMessage h
-                     either (\err -> IO.putStr $ show err ++ "\n")
-                            (\suc -> writeChan c suc)
-                            msg
-                   )                   
+  liftIO $ catch (bracket (NETWORK.accept sock')
+                          (\(h, _, _) -> hClose h)
+                          (\(h, hostName, portNumber) -> liftIO $ do
+                             msg <- KVProtocol.getMessage h
+                             either (\err -> IO.putStr $ show err ++ "\n")
+                                    (\suc -> writeChan c suc)
+                                    msg
+                          )
+                  )
+                  --Wait for resources to free a bit (especially a problem when local)
+                  (\(e :: SomeException) -> threadDelay 10000)
   processMessages
 
 
@@ -230,8 +263,9 @@ lookupTX tid s = let inR = Map.lookup tid (unresolvedTxns s)
 handleDecision :: KVMessage -> MState SlaveState IO ()
 handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
   --REMOVE THIS IF YOU WANT SLAVE TO NOT DIE PROBABALISTICALLY
- -- death <- liftIO $ mwc $ intIn (1,100)
-  if False then liftIO $ raiseSignal sigABRT --die "--DIE!"
+  death <- liftIO $ mwc $ intIn (1,100)
+  --don't make death too probable, leads to unrealistic problems (OS type issues)
+  if (death > 90) then liftIO $ raiseSignal sigABRT --die "--DIE!"
   else do 
     let config = cfg s
         maybeRequest = lookupTX tid s

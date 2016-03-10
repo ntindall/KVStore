@@ -51,9 +51,6 @@ issueNRequests mH n mvars
 createRequest n = let nBstring = C8.pack $ show n 
                   in Right (nBstring, nBstring)
 
-
-
-
 cLIissueRequests :: CL.MasterHandle -> IO ()
 cLIissueRequests mH = do
 
