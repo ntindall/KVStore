@@ -184,7 +184,7 @@ processMessage _ = undefined
 
 timeoutThread :: MState MasterState IO ()
 timeoutThread = get >>= \s -> do
-  traceShowM $ "[!] TIMING OUT..."
+  liftIO $ IO.putStrLn "[!] TIMING OUT..."
 --  liftIO $ traceIO "Timing out! in timeout thread!"
   -- TODO: timeout transactions individually
    -- mapM_ (\(txn_id,(ts,msg)) -> do
@@ -205,7 +205,7 @@ timeoutThread = get >>= \s -> do
 
   -- mapM clearTX (L.map fst timedOutTxns)
 
-  liftIO $ threadDelay 100000
+  liftIO $ threadDelay 1000000
   timeoutThread
 
 slaveResponded :: KVTxnId -> SlvId -> MState MasterState IO ()

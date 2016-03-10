@@ -42,10 +42,7 @@ writeReady filename msg = do
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "READY", C8.pack $ show field_txn, key, val, C8.pack $ show field_issuedUTC]) `C8.append` (C8.pack "\n")
 
-  l <- lockFile filename Exclusive
-  B.appendFile filename logEntry
-  unlockFile l 
-
+  withFileLock filename Exclusive (\_ -> B.appendFile filename logEntry)
 
 flush :: FilePath -> IO ()
 flush filename = B.writeFile filename B.empty
@@ -58,9 +55,7 @@ writeCommit filename msg = do
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "COMMIT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
 
-  l <- lockFile filename Exclusive
-  B.appendFile filename logEntry
-  unlockFile l 
+  withFileLock filename Exclusive (\_ -> B.appendFile filename logEntry)
 
 writeAbort :: FilePath -> KVMessage -> IO()
 writeAbort filename msg = do
@@ -70,9 +65,7 @@ writeAbort filename msg = do
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "ABORT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
 
-  l <- lockFile filename Exclusive
-  B.appendFile filename logEntry
-  unlockFile l 
+  withFileLock filename Exclusive (\_ -> B.appendFile filename logEntry)
 
 
 --rebuild the in memory store using the log, redoing all committed actions that
@@ -127,9 +120,7 @@ handleLines (x:xs) unmatchedReadyMap storeMap
             else handleLines xs (Map.delete txn_id unmatchedReadyMap) 
                                 storeMap
           Nothing -> do
-            --TODO :: DO WE WANT TO HANDLE THIS QUIETLY???? 
-              IO.putStr $ "Error, corrupted logfile... unexpected COMMIT with no preceeding READY"
-              return (Map.empty, Map.empty) -- todo, exception?storeMap --allow duplicate commits and ABORTS
+            handleLines xs unmatchedReadyMap storeMap
 
       "ABORT" -> do
         -- delete the transaction id from the unmatched readyMap

@@ -74,9 +74,7 @@ main = do
               --install trap
               handler = Catch (do
                 threadDelay 1000000
-                --need to release locks we may have acquired
-                unlockFile $ persistentFileName slaveId
-                unlockFile $ LOG.persistentLogName slaveId
+                traceShowM $ "... [!][!][!] DEATH OCCURED... REBOOTING [!][!][!] ..."
                 main_ >>= \_ -> return ())
           installHandler sigABRT handler Nothing
           main_ >>= (\_ -> return ())
@@ -100,7 +98,7 @@ runKVSlave :: MState SlaveState IO ()
 runKVSlave = get >>= \s -> do 
   c <- liftIO newChan
 
-  traceShowM $ "[!] REBUILDING... "
+  liftIO $ IO.putStrLn "[!] REBUILDING... "
 
   let config = cfg s
       slaveId = fromJust $ Lib.slaveNumber config
@@ -116,25 +114,20 @@ runKVSlave = get >>= \s -> do
     let persistentFile = (persistentFileName slaveId)
         bakFile = persistentFile ++ ".bak"
 
-    l1 <- liftIO $ lockFile persistentFile Exclusive
-    l2 <- liftIO $ lockFile bakFile Exclusive
-
-    liftIO $ B.writeFile bakFile (Utils.writeKVList $ Map.toList store')
-    --clear the log file
-    --B.writeFile (LOG.persistentLogName slaveId) B.empty
-    --TODO: don't clear log until all of these recoveredTxns ahve been acked (need either separate map or tuple).
-    --overwrite the old store
-    liftIO $ DIR.renameFile bakFile persistentFile
+    liftIO $ withFileLock persistentFile Exclusive
+                          (\_ -> withFileLock bakFile Exclusive
+                            (\_ -> do
+                              B.writeFile bakFile (Utils.writeKVList $ Map.toList store')
+                              DIR.renameFile bakFile persistentFile
+                            )
+                          )
 
     modifyM_ $ \s -> s { sock = skt, channel = c, store = store', recoveredTxns = unackedTxns }
-
-    liftIO $ unlockFile l1
-    liftIO $ unlockFile l2
   else do
    -- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
     modifyM_ $ \s -> s { sock = skt, channel = c, store = Map.empty }
     return ()
-  traceShowM $ "[!] DONE REBUILDING... "
+  liftIO $ IO.putStrLn "[!] DONE REBUILDING... "
 
   forkM_ sendResponses
   forkM_ checkpoint
@@ -147,26 +140,26 @@ checkpoint = get >>= \s -> do
     let config = cfg s
         mySlaveId = fromJust (Lib.slaveNumber config)
 
-    traceShowM $ "[!][!][!] CHECKPOINT"
+    IO.putStrLn "[!][!][!] CHECKPOINT"
     --If we have fully recovered
     if (Map.null $ recoveredTxns s)
     then do
-      traceShowM $ "[!][!][!] Flushing log, full recovery achieved..."
       --lock down the log file, cannot have race between checkpoint being written
        --and log being flushed.
-      l <- lockFile (LOG.persistentLogName mySlaveId) Exclusive
-
-
-
-      --no lock is needed, only this thread writes to this file
-      B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
-      LOG.flush (LOG.persistentLogName mySlaveId) 
-
-      unlockFile l
+      withFileLock (LOG.persistentLogName mySlaveId) Exclusive
+                   (\_ -> withFileLock (persistentFileName mySlaveId) Exclusive
+                      (\_ -> do
+                        B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
+                        LOG.flush (LOG.persistentLogName mySlaveId) 
+                      )
+                   )
     else do
-      B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
+      withFileLock (persistentFileName mySlaveId) Exclusive 
+                   (\_ -> B.writeFile (persistentFileName mySlaveId) 
+                                      (Utils.writeKVList $ Map.toList (store s))
+                   )
 
-  liftIO $ threadDelay 2000000
+  liftIO $ threadDelay 5000000
   checkpoint
 
 processMessages :: MState SlaveState IO ()
@@ -252,7 +245,7 @@ safeUpdateStore k v ts = modifyM_ $ \s -> do
 
 clearTxn :: KVTxnId -> MState SlaveState IO ()
 clearTxn tid = modifyM_ $ \s -> s { unresolvedTxns = Map.delete tid (unresolvedTxns s)
-                                  , recoveredTxns = Map.delete tid (unresolvedTxns s)
+                                  , recoveredTxns = Map.delete tid (recoveredTxns s)
                                   }
 
 --Lookup the value in both transaction maps
@@ -265,7 +258,7 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
   --REMOVE THIS IF YOU WANT SLAVE TO NOT DIE PROBABALISTICALLY
   death <- liftIO $ mwc $ intIn (1,100)
   --don't make death too probable, leads to unrealistic problems (OS type issues)
-  if (death > 90) then liftIO $ raiseSignal sigABRT --die "--DIE!"
+  if (death > 98) then liftIO $ raiseSignal sigABRT --die "--DIE!"
   else do 
     let config = cfg s
         maybeRequest = lookupTX tid s
