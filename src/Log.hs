@@ -47,6 +47,9 @@ writeReady filename msg = do
   unlockFile l 
 
 
+flush :: FilePath -> IO ()
+flush filename = B.writeFile filename B.empty
+
 writeCommit :: FilePath -> KVMessage -> IO()
 writeCommit filename msg = do
   -- LOG COMMIT, <timestamp, txn_id>

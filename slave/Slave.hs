@@ -34,6 +34,7 @@ import qualified Utils
 
 import Math.Probable
 import System.Posix.Signals
+import System.FileLock
 
 --- todo, touch file when slave registers
 -- todo, slave registration
@@ -46,7 +47,7 @@ data SlaveState = SlaveState {
                 , cfg :: Lib.Config
                 , store :: Map.Map KVKey (KVVal, Int)
                 , unresolvedTxns :: Map.Map KVTxnId KVMessage
-                , fileLock :: FileLock
+                , recoveredTxns :: Map.Map KVTxnId KVMessage
                 }
  --  deriving (Show)
 
@@ -60,7 +61,11 @@ main = do
       in if slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config)
          then Lib.printUsage --error
          else do
-           execMState runKVSlave $ SlaveState {cfg = config, store = Map.empty, unresolvedTxns = Map.empty }
+           execMState runKVSlave $ SlaveState { cfg = config 
+                                              ,  store = Map.empty
+                                              ,  unresolvedTxns = Map.empty
+                                              ,  recoveredTxns = Map.empty 
+                                              }
            return ()
 
 runKVSlave :: MState SlaveState IO ()
@@ -78,7 +83,7 @@ runKVSlave = get >>= \s -> do
   if fileExists
   then do
     store <- liftIO $ liftM (Map.fromList . Utils.readKVList) $ B.readFile $ persistentFileName slaveId
-    (recoveredTxns, store') <- liftIO $ LOG.rebuild (LOG.persistentLogName slaveId) store
+    (unackedTxns, store') <- liftIO $ LOG.rebuild (LOG.persistentLogName slaveId) store
 
     let persistentFile = (persistentFileName slaveId)
         bakFile = persistentFile ++ ".bak"
@@ -93,7 +98,7 @@ runKVSlave = get >>= \s -> do
     --overwrite the old store
     liftIO $ DIR.renameFile bakFile persistentFile
 
-    modifyM_ $ \s -> s { socket = skt, channel = c, store = store', unresolvedTxns = recoveredTxns }
+    modifyM_ $ \s -> s { socket = skt, channel = c, store = store', recoveredTxns = unackedTxns }
 
     liftIO $ unlockFile l1
     liftIO $ unlockFile l2
@@ -115,8 +120,22 @@ checkpoint = get >>= \s -> do
     let config = cfg s
         mySlaveId = fromJust (Lib.slaveNumber config)
 
-    --no lock is needed, only this thread writes to this file
-    B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
+    --If we have fully recovered
+    if (Map.null $ recoveredTxns s)
+    then do
+      traceShowM $ "Flushing log, full recovery achieved..."
+      --lock down the log file, cannot have race between checkpoint being written
+       --and log being flushed.
+      l <- lockFile (LOG.persistentLogName mySlaveId) Exclusive
+
+      --no lock is needed, only this thread writes to this file
+      B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
+      LOG.flush (LOG.persistentLogName mySlaveId) 
+
+      unlockFile l
+    else do
+      traceShowM $ "No flush"
+      B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
 
   liftIO $ threadDelay 2000000
   checkpoint
@@ -200,7 +219,14 @@ safeUpdateStore k v ts = modifyM_ $ \s -> do
   else s
 
 clearTxn :: KVTxnId -> MState SlaveState IO ()
-clearTxn tid = modifyM_ $ \s -> s { unresolvedTxns = Map.delete tid (unresolvedTxns s)}
+clearTxn tid = modifyM_ $ \s -> s { unresolvedTxns = Map.delete tid (unresolvedTxns s)
+                                  , recoveredTxns = Map.delete tid (unresolvedTxns s)
+                                  }
+
+--Lookup the value in both transaction maps
+lookupTX :: KVTxnId -> SlaveState -> Maybe KVMessage
+lookupTX tid s = let inR = Map.lookup tid (unresolvedTxns s)
+                 in if (isJust inR) then inR else Map.lookup tid (recoveredTxns s)
 
 handleDecision :: KVMessage -> MState SlaveState IO ()
 handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
@@ -209,7 +235,7 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
   if (death > 80) then liftIO $ raiseSignal sigABRT --die "--DIE!"
   else do 
     let config = cfg s
-        maybeRequest = Map.lookup tid (unresolvedTxns s)
+        maybeRequest = lookupTX tid s
         mySlaveId = getMyId config
 
     if isJust maybeRequest 
