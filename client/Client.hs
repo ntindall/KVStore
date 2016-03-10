@@ -2,9 +2,12 @@
 
 module Main where
 
+import Control.Concurrent
+
 import Data.Maybe
 import Data.ByteString.Lazy  as B
 import Data.ByteString.Lazy.Char8 as C8
+import Data.Serialize
 
 import qualified System.IO as IO
 
@@ -15,21 +18,49 @@ import qualified Lib as Lib
 import qualified KVProtocol (getMessage, sendMessage, connectToMaster)
 import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
 
+import Math.Probable
+
+import Debug.Trace
+
 main :: IO ()
 main = Lib.parseArguments >>= \(Just config) -> do
   masterH <- CL.registerWithMaster config
 
-  issueRequests masterH
+  children <- issueNRequests masterH 100 []
+
+  mapM_ takeMVar children
   --todo, unregisted
 
+issueNRequests :: CL.MasterHandle -> Int -> [MVar ()] -> IO ([MVar ()])
+issueNRequests mH n mvars
+  | n == 0 = return mvars
+  | otherwise = do
+    let request = createRequest n
+    m <- newEmptyMVar 
+    tid <- forkFinally (case request of
+                      (Left k) -> do
+                        CL.getVal mH k
+                        return ()
+                      (Right (k,v)) -> do 
+                        CL.putVal mH k v
+                        return ()
+                  ) (\_ -> putMVar m ())
 
-issueRequests :: CL.MasterHandle -> IO ()
-issueRequests mH = do
+    issueNRequests mH (n - 1) (mvars ++ [m])
+
+createRequest n = let nBstring = C8.pack $ show n 
+                  in Right (nBstring, nBstring)
+
+
+
+
+cLIissueRequests :: CL.MasterHandle -> IO ()
+cLIissueRequests mH = do
 
   text <- IO.getLine
   request <- parseInput (C8.pack text)
   if isNothing request
-  then issueRequests mH
+  then cLIissueRequests mH
   else do
     let request' = fromJust request
     case request' of
@@ -39,7 +70,7 @@ issueRequests mH = do
         CL.putVal mH k v
     return ()
 
-  issueRequests mH
+  cLIissueRequests mH
 
 parseInput :: B.ByteString -> IO(Maybe (Either KVKey (KVKey, KVVal)))
 parseInput text = do

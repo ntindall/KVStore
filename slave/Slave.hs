@@ -230,8 +230,8 @@ lookupTX tid s = let inR = Map.lookup tid (unresolvedTxns s)
 handleDecision :: KVMessage -> MState SlaveState IO ()
 handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
   --REMOVE THIS IF YOU WANT SLAVE TO NOT DIE PROBABALISTICALLY
-  death <- liftIO $ mwc $ intIn (1,100)
-  if (death > 80) then liftIO $ raiseSignal sigABRT --die "--DIE!"
+ -- death <- liftIO $ mwc $ intIn (1,100)
+  if False then liftIO $ raiseSignal sigABRT --die "--DIE!"
   else do 
     let config = cfg s
         maybeRequest = lookupTX tid s
