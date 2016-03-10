@@ -28,6 +28,8 @@ import Control.Monad.Catch as Catch
 import Control.Concurrent
 import Control.Concurrent.Chan
 
+import System.Directory as DIR
+
 import qualified KVProtocol (getMessage, sendMessage, kV_TIMEOUT)
 import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
 
@@ -83,6 +85,12 @@ main :: IO ()
 main = Lib.parseArguments >>= \args -> case args of
   Nothing -> Lib.printUsage -- an error occured 
   Just c -> do
+    --INITIALIZE THE DATABASE STATE--
+    --DANGEROUS CODE BELOW--
+    DIR.removeDirectoryRecursive "database"
+    DIR.createDirectory "database"
+    DIR.createDirectory "database/logs"
+    ---------------------------------
     ms <- MasterState <$> listenOn (Lib.masterPortId c) <*> newChan
     execMState initMaster $ ms c Map.empty
     return ()

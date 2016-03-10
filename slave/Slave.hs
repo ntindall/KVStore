@@ -106,11 +106,10 @@ runKVSlave = get >>= \s -> do
    -- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
     modifyM_ $ \s -> s { socket = skt, channel = c, store = Map.empty }
     return ()
+  traceShowM $ "[!] DONE REBUILDING... "
 
   forkM_ sendResponses
   forkM_ checkpoint
-
-  traceShowM $ "[!] DONE REBUILDING... "
 
   processMessages
 
@@ -120,10 +119,11 @@ checkpoint = get >>= \s -> do
     let config = cfg s
         mySlaveId = fromJust (Lib.slaveNumber config)
 
+    traceShowM $ "[!][!][!] CHECKPOINT"
     --If we have fully recovered
     if (Map.null $ recoveredTxns s)
     then do
-      traceShowM $ "Flushing log, full recovery achieved..."
+      traceShowM $ "[!][!][!] Flushing log, full recovery achieved..."
       --lock down the log file, cannot have race between checkpoint being written
        --and log being flushed.
       l <- lockFile (LOG.persistentLogName mySlaveId) Exclusive
@@ -134,7 +134,6 @@ checkpoint = get >>= \s -> do
 
       unlockFile l
     else do
-      traceShowM $ "No flush"
       B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
 
   liftIO $ threadDelay 2000000
