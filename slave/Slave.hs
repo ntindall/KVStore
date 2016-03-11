@@ -22,7 +22,6 @@ import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Monad.Reader
-import qualified Control.Monad.Catch as Catch
 import Control.Arrow as CA
 
 import Control.Monad
@@ -46,12 +45,13 @@ import System.FileLock
 type SlaveId = Int
 
 data SlaveState = SlaveState {
-                  sock :: NETWORK.Socket
-                , channel :: Chan KVMessage
+                  channel :: Chan KVMessage
                 , cfg :: Lib.Config
                 , store :: Map.Map KVKey (KVVal, KVTime)
                 , unresolvedTxns :: Map.Map KVTxnId KVMessage
                 , recoveredTxns :: Map.Map KVTxnId KVMessage
+                , receiver :: Handle
+                , sender :: MVar Handle
                 }
  --  deriving (Show)
 
@@ -122,12 +122,18 @@ runKVSlave = get >>= \s -> do
                             )
                           )
 
-    modifyM_ $ \s -> s { sock = skt, channel = c, store = store', recoveredTxns = unackedTxns }
+    modifyM_ $ \s -> s { channel = c, store = store', recoveredTxns = unackedTxns }
   else do
    -- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
-    modifyM_ $ \s -> s { sock = skt, channel = c, store = Map.empty }
+    modifyM_ $ \s -> s { channel = c, store = Map.empty }
     return ()
   liftIO $ IO.putStrLn "[!] DONE REBUILDING... "
+
+  sndr <- liftIO $ KVProtocol.connectToMaster config
+  rcvr <- liftIO $ fmap fst3 (NETWORK.accept skt)
+
+  modifyM_ $ \s -> s { sender = newMVar sndr
+                     , receiver = rcvr }
 
   forkM_ sendResponses
   forkM_ checkpoint
@@ -164,20 +170,14 @@ checkpoint = get >>= \s -> do
 
 processMessages :: MState SlaveState IO ()
 processMessages = get >>= \s -> do
-  let sock' = sock s
+  let rcvr = receiver s
       c = channel s
 
-  liftIO $ catch (bracket (NETWORK.accept sock')
-                          (\(h, _, _) -> hClose h)
-                          (\(h, hostName, portNumber) -> liftIO $ do
-                             msg <- KVProtocol.getMessage h
-                             either (\err -> IO.putStr $ show err ++ "\n")
-                                    (\suc -> writeChan c suc)
-                                    msg
-                          )
-                  )
-                  --Wait for resources to free a bit (especially a problem when local)
-                  (\(e :: SomeException) -> threadDelay 10000)
+  msg <- liftIO $ KVProtocol.getMessage rcvr
+  liftIO $ either (\err -> IO.putStr $ show err ++ "\n")
+                  (\suc -> writeChan c suc)
+                  msg
+
   processMessages
 
 
@@ -186,9 +186,9 @@ persistentFileName slaveId = "database/kvstore_" ++ show slaveId ++ ".txt"
 
 sendResponses :: MState SlaveState IO ()
 sendResponses = get >>= \s -> do
-  thunk <- liftIO $ do
-            message <- readChan (channel s)
+  message <- liftIO $ readChan (channel s)
 
+  thunk <- liftIO $ do
             return $ case message of
               KVResponse{} -> handleResponse
               KVRequest{}  -> handleRequest message
@@ -207,7 +207,6 @@ handleRequest :: KVMessage -> MState SlaveState IO ()
 handleRequest msg = get >>= \s -> do
   let config = cfg s
 
-  h <- liftIO $ KVProtocol.connectToMaster config
   let field_txn  = txn_id msg
       field_request = request msg
       mySlaveId = getMyId config
@@ -222,7 +221,7 @@ handleRequest msg = get >>= \s -> do
 
         liftIO $ do
           LOG.writeReady (LOG.persistentLogName mySlaveId) msg
-          KVProtocol.sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
+          KVProtocol.sendMessage (sender s) (KVVote field_txn mySlaveId VoteReady field_request)
 
       --todo, comment
       DelReq ts key -> do
@@ -232,14 +231,12 @@ handleRequest msg = get >>= \s -> do
 
         liftIO $ do
           LOG.writeReady (LOG.persistentLogName mySlaveId) msg
-          KVProtocol.sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
+          KVProtocol.sendMessage (sender s) (KVVote field_txn mySlaveId VoteReady field_request)
 
       GetReq _ key     -> liftIO $ do 
         case Map.lookup key (store s)  of
-          Nothing -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
-          Just val -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key (Just (fst val))))
-
-  liftIO $ IO.hClose h
+          Nothing -> KVProtocol.sendMessage (sender s) (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
+          Just val -> KVProtocol.sendMessage (sender s) (KVResponse field_txn mySlaveId (KVSuccess key (Just (fst val))))
 
 safeUpdateStore :: KVKey 
                 -> Maybe KVVal 
@@ -294,14 +291,10 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
       let errormsg = if decision == DecisionCommit then Nothing
                      else Just $ C8.pack "Transaction aborted"
       liftIO $ do
-        h <- KVProtocol.connectToMaster config
-        KVProtocol.sendMessage h (KVAck tid (Just mySlaveId) errormsg)
-        IO.hClose h
+        KVProtocol.sendMessage (sender s) (KVAck tid (Just mySlaveId) errormsg)
     else --nothing to do, but need to ACK to let master know we are back alive
       liftIO $ do
-        h <- KVProtocol.connectToMaster config
-        KVProtocol.sendMessage h (KVAck tid (Just mySlaveId) (Just "Duplicate DECISION message"))
-        IO.hClose h
+        KVProtocol.sendMessage (sender s) (KVAck tid (Just mySlaveId) (Just "Duplicate DECISION message"))
 
 handleResponse = undefined
 handleVote = undefined

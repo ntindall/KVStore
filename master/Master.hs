@@ -26,6 +26,7 @@ import Control.Monad.State
 import Control.Exception
 import Control.Monad.Reader
 import Control.Monad.Catch as Catch
+import qualified Control.Monad.Error as MonadError
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Concurrent.Thread.Delay
@@ -51,6 +52,8 @@ data MasterState = MasterState {
                   --the votemap contains as a key the txn id, and has as a value
                   --the set of slaves that have responded with a READY vote
                 , txs :: Map.Map KVTxnId TX
+                , clntHMap :: Map.Map Int (MVar Handle)
+                , slvHMap :: Map.Map KVSlave (MVar Handle)
                 -- , voteMap :: Map.Map KVTxnId (Set.Set Int)
                 -- , voteMap :: KVMap Int
                 --   --the ackMap contains as a key the txn id, and has as a value
@@ -78,8 +81,8 @@ data TX = TX {
 data KVSlave = KVSlave { slvID :: Int , host :: HostName,  port :: PortID }
 
 instance Show (MasterState) where
-  show (MasterState skt _ cfg txs) = 
-    show skt ++ show cfg ++ show txs
+  show (MasterState skt _ cfg txs cMap sMap) = 
+    show skt ++ show cfg ++ show txs ++ show cMap ++ show sMap
 
 -- Entry Point
 main :: IO ()
@@ -93,12 +96,22 @@ main = Lib.parseArguments >>= \args -> case args of
     DIR.createDirectory "database/logs"
     ---------------------------------
     ms <- MasterState <$> listenOn (Lib.masterPortId c) <*> newChan
-    execMState initMaster $ ms c Map.empty
+    execMState initMaster $ ms c Map.empty Map.empty Map.empty
     return ()
 
 -- Initialization for Master Node
 initMaster :: MState MasterState IO ()
-initMaster = do
+initMaster = get >>= \s -> do
+  let slaves = L.mapAccumL (\i (h,p) -> (i+1, KVSlave i h p)) 0 (slaveConfig $ cfg s)
+
+  slaves' <- mapM (\slv -> do
+                h <- liftIO $ tryConnect_ slv >>= (\r -> newMVar r)
+
+                liftIO $ return (slv, h)
+             ) (snd slaves)
+
+  modifyM_ $ \s -> s { slvHMap = Map.fromList slaves' }
+
   forkM_ $ listen
   forkM_ $ timeoutThread
   processMessages
@@ -139,17 +152,9 @@ processMessage (KVVote tid sid VoteReady request) = do
 
 processMessage kvMsg@(KVResponse tid sid _) = do
   slaveResponded tid sid
-  --complete <- isComplete tid
-  --when complete $ do
-
-  --forward first response to client, delete from map
   complete <- isComplete tid
   if complete then sendMsgToClient kvMsg >>= (\_ -> clearTX tid) else (liftIO $ return ())
 
-  -- TODO: add timeout for get reqs
-  -- addAck tid sid
-  -- complete <- ackComplete tid
-  -- if complete then clearAcksTX tid else return ()
 
 processMessage kvMsg@(KVRequest tid req) = do
   now <- liftIO U.currentTimeMicro
@@ -186,14 +191,7 @@ processMessage _ = undefined
 
 timeoutThread :: MState MasterState IO ()
 timeoutThread = get >>= \s -> do
-  --liftIO $ IO.putStrLn "[!] TIMING OUT..."
---  liftIO $ traceIO "Timing out! in timeout thread!"
-  -- TODO: timeout transactions individually
-   -- mapM_ (\(txn_id,(ts,msg)) -> do
-   --         if (now - KVProtocol.kV_TIMEOUT_MICRO >= ts)
-   --         then sendDecisionToRing (KVDecision txn_id DecisionAbort (request msg))
-   --         else liftIO $ return ()
-   --       ) Map.toList $ txs s 
+
   now <- liftIO $ U.currentTimeMicro
   mapM_ (\(tid, tx) ->
           if (now - KVProtocol.kV_TIMEOUT_MICRO >= timeout tx) 
@@ -304,17 +302,24 @@ forwardToSlaveRetry slv msg timeout = get >>= \s -> do
     return ()
 
 forwardToSlave :: KVSlave -> KVMessage -> MState MasterState IO ()
-forwardToSlave slv msg = do
+forwardToSlave slv msg = get >>= \s -> do
   traceShowM "forwardtoslave called"
-  result <- tryConnect slv msg
-  case result of
-    Just h -> do
-      liftIO $ do
-        KVProtocol.sendMessage h msg
-        hClose h
-    Nothing -> do
-      traceShowM "unable to connect"      
-      liftIO $ return ()
+  let h = fromJust $ Map.lookup (slvHMap s) slv
+  MonadError.catchError (liftIO $ KVProtocol.sendMessage h msg)
+                        (\(e :: IOException) -> do
+                          modifyM_ $ \s -> do
+                            let tx = lookupTX (txn_id msg) s
+                                tx' = fromJust tx
+                            if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
+                        )
+
+tryConnect_ :: KVSlave -> IO (Handle)
+tryConnect_ slv = Catch.catch (connectTo (host slv) (port slv))
+                              (\(e :: SomeException) -> do 
+                                delay 1000000
+                                tryConnect_ slv
+                              )
+
 
 tryConnect :: KVSlave -> KVMessage -> MState MasterState IO (Maybe Handle)
 tryConnect slv msg = do

@@ -62,7 +62,7 @@ data KVRequest = GetReq {
 
 data KVResponse = KVSuccess {
                     key :: KVKey
-                  , val :: Maybe KVVal --Nothing if not found (missing) 
+                  , val :: Maybe KVVal --Nothing if not found (missing)
                   }
                 | KVFailure {
                     errorMsg :: B.ByteString
@@ -136,12 +136,14 @@ getMessage h = do
     Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
     return $ decodeMsg (fromStrict bytes)
 
-sendMessage :: Handle -> KVMessage -> IO ()
-sendMessage h msg = do
- -- let color = prettyPrint msg
-  C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy msg)
-  Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow
-
+sendMessage :: MVar Handle -> KVMessage -> IO ()
+sendMessage h msg = withMVar h 
+                    (\hdl -> do
+                      -- let color = prettyPrint msg
+                      C8.hPutStrLn hdl $ toStrict (CEREAL.encodeLazy msg)
+                      Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow
+                    )
+                    
 connectToMaster :: Lib.Config -> IO Handle
 connectToMaster cfg = catch (connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg))
                             (\(e :: SomeException) -> do

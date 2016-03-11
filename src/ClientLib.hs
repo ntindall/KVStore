@@ -104,7 +104,8 @@ registerWithMaster_ cfg s = do
 
   let txn_id = 0
   h <- KVProtocol.connectToMaster cfg
-  KVProtocol.sendMessage h (KVRegistration (0, txn_id) hostName (fromEnum pid))
+  hM <- newMVar h
+  KVProtocol.sendMessage hM (KVRegistration (0, txn_id) hostName (fromEnum pid))
   IO.hClose h
 
   clientId <- waitForFirstAck -- wait for the Master to respond with the initial ack, and
@@ -146,7 +147,8 @@ sendRequestAndWaitForResponse mvar req = do
                        , outstandingTxns = outstandingTxns'}
 
   h <- KVProtocol.connectToMaster config
-  KVProtocol.sendMessage h request
+  hM <- newMVar h
+  KVProtocol.sendMessage hM request
   IO.hClose h
 
   response <- takeMVar myMvar
