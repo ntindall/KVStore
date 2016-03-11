@@ -54,6 +54,10 @@ data KVRequest = GetReq {
                 , putkey :: KVKey
                 , putval :: KVVal
                 }
+               | DelReq {
+                  issuedUTC :: KVTime
+                , delkey :: KVKey
+                }
   deriving (Generic, Show)
 
 data KVResponse = KVSuccess {

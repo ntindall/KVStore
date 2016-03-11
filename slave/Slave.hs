@@ -220,14 +220,20 @@ handleRequest msg = get >>= \s -> do
           let updatedTxnMap = Map.insert field_txn msg (unresolvedTxns s')
           in s' {unresolvedTxns = updatedTxnMap}
 
-        -- LOCK!!!@!@! !@ ! !
         liftIO $ do
           LOG.writeReady (LOG.persistentLogName mySlaveId) msg
-
-        -- UNLOCK
-
           KVProtocol.sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
-        --vote abort if invalid key value
+
+      --todo, comment
+      DelReq ts key -> do
+        modifyM_ $ \s' ->
+          let updatedTxnMap = Map.insert field_txn msg (unresolvedTxns s')
+          in s' {unresolvedTxns = updatedTxnMap}
+
+        liftIO $ do
+          LOG.writeReady (LOG.persistentLogName mySlaveId) msg
+          KVProtocol.sendMessage h (KVVote field_txn mySlaveId VoteReady field_request)
+
       GetReq _ key     -> liftIO $ do 
         case Map.lookup key (store s)  of
           Nothing -> KVProtocol.sendMessage h (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
@@ -235,12 +241,17 @@ handleRequest msg = get >>= \s -> do
 
   liftIO $ IO.hClose h
 
-safeUpdateStore :: KVKey -> KVVal -> KVTime -> MState SlaveState IO ()
+safeUpdateStore :: KVKey 
+                -> Maybe KVVal 
+                -> KVTime 
+                -> MState SlaveState IO ()
 safeUpdateStore k v ts = modifyM_ $ \s -> do
   let oldVal = Map.lookup k (store s)
 
   if isNothing oldVal || snd (fromJust oldVal) <= ts 
-  then s { store = Map.insert k (v,ts) (store s)}
+  then 
+    if isJust v then s { store = Map.insert k (fromJust v,ts) (store s)}
+                else s { store = Map.delete k (store s)}
   else s
 
 clearTxn :: KVTxnId -> MState SlaveState IO ()
@@ -267,14 +278,14 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
     if isJust maybeRequest 
     then do
       let field_request = fromJust $ maybeRequest
-          (ts, key,val) = case request field_request of -- TODO, do we even need the decision to ahve the request anymore?
-                        (PutReq ts k v) -> (ts, k, v)
-                        (GetReq ts _) -> undefined -- protocol error
 
       if decision == DecisionCommit 
       then do
-        safeUpdateStore key val ts 
-        -- NEED TO FILELOCK
+        case request field_request of -- TODO, do we even need the decision to ahve the request anymore?
+          (PutReq ts k v) -> safeUpdateStore k (Just v) ts
+          (DelReq ts k)   -> safeUpdateStore k Nothing ts
+          (GetReq ts _) -> undefined -- protocol error
+
         liftIO $ LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
       else do
         liftIO $ LOG.writeAbort (LOG.persistentLogName mySlaveId) msg

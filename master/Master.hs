@@ -155,6 +155,7 @@ processMessage kvMsg@(KVRequest tid req) = do
   let txstate = case req of
         GetReq{} -> RESPONSE
         PutReq{} -> VOTE
+        DelReq{} -> VOTE
   --Communicating with shard for the first time, keep track of this in the timeout map.
   modifyM_ $ \s -> addTX tid (TX txstate S.empty now kvMsg) s
   sendMsgToRing kvMsg

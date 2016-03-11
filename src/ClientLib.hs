@@ -5,6 +5,7 @@ module ClientLib
     ( registerWithMaster
     , putVal
     , getVal
+    , delVal
     , MasterHandle
     ) where
 
@@ -128,7 +129,7 @@ registerWithMaster_ cfg s = do
                  )
                  response
 
-sendRequestAndWaitForResponse :: MVar ClientState -> KVRequest -> IO(KVVal)
+sendRequestAndWaitForResponse :: MVar ClientState -> KVRequest -> IO(Maybe KVVal)
 sendRequestAndWaitForResponse mvar req = do
   myMvar <- newEmptyMVar
   state <- takeMVar mvar
@@ -154,15 +155,18 @@ sendRequestAndWaitForResponse mvar req = do
   let outstandingTxns'' = Map.delete tid (outstandingTxns state')
   putMVar mvar $ state' { outstandingTxns = outstandingTxns''}
 
-  return B.empty
+  return $ Just B.empty
+
+--todo, modify these functions to re-sendtherequestandwaitforresponse if an
+-- error occured.
 
 putVal :: MVar ClientState
        -> KVKey
        -> KVVal
-       -> IO(KVVal)
+       -> IO()
 putVal mvar k v = do
   now <- Utils.currentTimeMicro
-  sendRequestAndWaitForResponse mvar (PutReq now k v)
+  sendRequestAndWaitForResponse mvar (PutReq now k v) >>= (\_ -> return ())
 
 
 getVal :: MVar ClientState
@@ -170,4 +174,11 @@ getVal :: MVar ClientState
        -> IO(KVVal)
 getVal mvar k = do
   now <- Utils.currentTimeMicro
-  sendRequestAndWaitForResponse mvar (GetReq now k)
+  sendRequestAndWaitForResponse mvar (GetReq now k) >>= (\(Just x) -> return x)
+
+delVal :: MVar ClientState
+       -> KVKey
+       -> IO ()
+delVal mvar k = do
+  now <- Utils.currentTimeMicro
+  sendRequestAndWaitForResponse mvar (DelReq now k) >>= (\_ -> return ())

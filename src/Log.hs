@@ -30,17 +30,20 @@ type KeyValueMapWithState = Map.Map B.ByteString ((KVKey, KVVal, B.ByteString), 
 getSeparator :: B.ByteString
 getSeparator = " " --todo, escaping?
 
-writeReady :: FilePath -> KVMessage -> IO()
+writeReady :: FilePath 
+           -> KVMessage
+           -> IO()
 writeReady filename msg = do
   -- LOG READY, <timestamp, txn_id, key, newval>
   -- time <- Utils.currentTimeMicro
   let field_txn = txn_id msg
-      field_request = request msg
-      field_issuedUTC = issuedUTC field_request --use the timestamp the request was made
-      key = putkey field_request
-      val = putval field_request
+      field_request = request msg --use the timestamp the request was made
       sep = getSeparator
-      logEntry = (C8.intercalate sep [C8.pack "READY", C8.pack $ show field_txn, key, val, C8.pack $ show field_issuedUTC]) `C8.append` (C8.pack "\n")
+      logEntry = case field_request of
+                  PutReq ts key val -> 
+                    (C8.intercalate sep [C8.pack "READY", C8.pack $ show field_txn, key, val, C8.pack $ show ts]) `C8.append` (C8.pack "\n")
+                  DelReq ts key -> 
+                    (C8.intercalate sep [C8.pack "DELETE", C8.pack $ show field_txn, key, C8.pack $ show ts]) `C8.append` (C8.pack "\n")
 
   withFileLock filename Exclusive (\_ -> B.appendFile filename logEntry)
 
@@ -83,14 +86,16 @@ rebuild logPath oldStore = do
   return (Map.fromList $ List.map (\(txn_id,(k,v,ts)) -> 
                                     let txn_id' = read (C8.unpack txn_id) :: (Int, Int)
                                         ts_int  = read (C8.unpack ts)     :: KVTime
-                                    in (txn_id', KVRequest txn_id' (PutReq ts_int k v))
+                                    in case v of 
+                                      (Just v') -> (txn_id', KVRequest txn_id' (PutReq ts_int k v'))
+                                      Nothing   -> (txn_id', KVRequest txn_id' (DelReq ts_int k))
                                   ) unfinishedReqList
          , updatedStore)
 
 handleLines :: [B.ByteString]                      --each line in the file
-            -> Map.Map B.ByteString (KVKey, KVVal, B.ByteString) --unmatched ready map accumulator
+            -> Map.Map B.ByteString (KVKey, Maybe KVVal, B.ByteString) --unmatched ready map accumulator
             -> Map.Map KVKey (KVVal, KVTime)               --store accumulator
-            -> IO(Map.Map B.ByteString (KVKey, KVVal, B.ByteString), Map.Map KVKey (KVVal, KVTime))
+            -> IO(Map.Map B.ByteString (KVKey, Maybe KVVal, B.ByteString), Map.Map KVKey (KVVal, KVTime))
 handleLines [] unmatchedReadyMap storeMap = return (unmatchedReadyMap, storeMap)
 handleLines (x:xs) unmatchedReadyMap storeMap 
   | C8.null x = handleLines xs unmatchedReadyMap storeMap
@@ -106,7 +111,12 @@ handleLines (x:xs) unmatchedReadyMap storeMap
         let key = pieces !! 2
             val = pieces !! 3
             ts  = pieces !! 4
-            unmatchedReadyMap' = Map.insert txn_id (key, val, ts) unmatchedReadyMap
+            unmatchedReadyMap' = Map.insert txn_id (key, (Just val), ts) unmatchedReadyMap
+        handleLines xs unmatchedReadyMap' storeMap
+      "DELETE" -> do
+        let key = pieces !! 2
+            ts = pieces !! 3
+            unmatchedReadyMap' = Map.insert txn_id (key, Nothing, ts) unmatchedReadyMap
         handleLines xs unmatchedReadyMap' storeMap
       "COMMIT" -> 
         case Map.lookup txn_id unmatchedReadyMap of
@@ -114,9 +124,12 @@ handleLines (x:xs) unmatchedReadyMap storeMap
             let oldVal = Map.lookup k storeMap
                 ts_int = read (C8.unpack ts) :: KVTime
             
+            --SAFE UPDATE (timestamp check)
             if isNothing oldVal || snd (fromJust oldVal) <= ts_int
-            then handleLines xs (Map.delete txn_id unmatchedReadyMap) 
-                                (Map.insert k (v, ts_int) storeMap)
+            then 
+                handleLines xs (Map.delete txn_id unmatchedReadyMap) 
+                               (if isNothing v then Map.delete k storeMap
+                                               else (Map.insert k (fromJust v, ts_int) storeMap))
             else handleLines xs (Map.delete txn_id unmatchedReadyMap) 
                                 storeMap
           Nothing -> do

@@ -26,30 +26,32 @@ main :: IO ()
 main = Lib.parseArguments >>= \(Just config) -> do
   masterH <- CL.registerWithMaster config
 
-  children <- issueNRequests masterH 1000 []
+  cLIissueRequests masterH
 
-  mapM_ takeMVar children
+  --children <- issueNRequests masterH 1000 []
+
+  --mapM_ takeMVar children
   --todo, unregisted
 
-issueNRequests :: CL.MasterHandle -> Int -> [MVar ()] -> IO ([MVar ()])
-issueNRequests mH n mvars
-  | n == 0 = return mvars
-  | otherwise = do
-    let request = createRequest n
-    m <- newEmptyMVar 
-    tid <- forkFinally (case request of
-                      (Left k) -> do
-                        CL.getVal mH k
-                        return ()
-                      (Right (k,v)) -> do 
-                        CL.putVal mH k v
-                        return ()
-                  ) (\_ -> putMVar m ())
+--issueNRequests :: CL.MasterHandle -> Int -> [MVar ()] -> IO ([MVar ()])
+--issueNRequests mH n mvars
+--  | n == 0 = return mvars
+--  | otherwise = do
+--    let request = createRequest n
+--    m <- newEmptyMVar 
+--    tid <- forkFinally (case request of
+--                      (Left k) -> do
+--                        CL.getVal mH k
+--                        return ()
+--                      (Right (k,v)) -> do 
+--                        CL.putVal mH k v
+--                        return ()
+--                  ) (\_ -> putMVar m ())
 
-    issueNRequests mH (n - 1) (mvars ++ [m])
+--    issueNRequests mH (n - 1) (mvars ++ [m])
 
-createRequest n = let nBstring = C8.pack $ show n 
-                  in Right (nBstring, nBstring)
+--createRequest n = let nBstring = C8.pack $ show n 
+--                  in Right (nBstring, nBstring)
 
 cLIissueRequests :: CL.MasterHandle -> IO ()
 cLIissueRequests mH = do
@@ -62,9 +64,9 @@ cLIissueRequests mH = do
     let request' = fromJust request
     case request' of
       (Left k) -> do
-        CL.getVal mH k
+        CL.delVal mH k >>= (\_ -> return ())
       (Right (k,v)) -> do 
-        CL.putVal mH k v
+        CL.putVal mH k v 
     return ()
 
   cLIissueRequests mH
@@ -77,7 +79,7 @@ parseInput text = do
            key = pieces !! 1
            val | Prelude.length pieces >= 3 = pieces !! 2
                | otherwise = B.empty
-
+               
            in if reqType == "PUT" || reqType == "put"
               then return $ Just (Right (key, val))
               else return $ Just (Left key)
