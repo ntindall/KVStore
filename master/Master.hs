@@ -6,6 +6,7 @@ module Main where
 import Lib
 import System.IO as IO
 import Network
+import FarmHash as HASH
 
 import Data.ByteString.Lazy as B
 import Data.ByteString.Lazy.Char8 as C8
@@ -220,7 +221,7 @@ isComplete :: KVTxnId -> MState MasterState IO Bool
 isComplete tid = get >>= \s -> do
   let tx = lookupTX tid s
       tx' = fromJust tx
-  if isJust tx then return $ S.size (responded tx') == Prelude.length (Lib.slaveConfig $ cfg s) else return False
+  if isJust tx then return $ S.size (responded tx') == 2 else return False
 
 timedOut :: KVTxnId -> MState MasterState IO Bool
 timedOut tid = get >>= \s -> liftIO $ do
@@ -265,11 +266,22 @@ sendDecisionToRing msg@(KVDecision tid decision req) = get >>= \s -> do
   if isJust tx then mapM_ (\n -> if (not . S.member (slvID n) $ responded $ tx') then forkM_ $ forwardToSlave n msg else return ()) shard
   else return ()
 
---TODO: something smarter
 consistentHashing :: KVMessage -> MState MasterState IO [KVSlave]
-consistentHashing msg = get >>= \s -> do
-  let shard = L.mapAccumL (\i (h, p) -> (i+1, KVSlave i h p)) 0 (slaveConfig $ cfg s)
-  return $ snd shard
+consistentHashing (KVRequest _ req)    = consistentHashing_ req
+consistentHashing (KVDecision _ _ req) = consistentHashing_ req
+
+consistentHashing_ :: KVRequest -> MState MasterState IO [KVSlave]
+consistentHashing_ request = get >>= \s -> do
+    let ring = (slaveConfig $ cfg s)
+        current = getHash request `mod` (L.length ring)
+        successor = (current + 1) `mod` (L.length ring)
+        shard = [uncurry (\h p -> KVSlave current h p) (ring !! current),
+                 uncurry (\h p -> KVSlave successor h p) (ring !! successor)]
+    return shard
+    where getHash (GetReq _ k)   = fromIntegral $ HASH.hash32 (B.toStrict k)
+          getHash (PutReq _ k _) = fromIntegral $ HASH.hash32 (B.toStrict k)
+          getHash (DelReq _ k)   = fromIntegral $ HASH.hash32 (B.toStrict k) 
+
 
 sendMsgToRing :: KVMessage -> MState MasterState IO ()
 sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToSlave n msg)

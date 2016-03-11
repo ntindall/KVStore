@@ -44,6 +44,7 @@ executable kvstore-master
                      , directory
                      , concurrent-extra >= 0.5
                      , unbounded-delays
+                     , farmhash
   default-language:    Haskell2010
 
 executable kvstore-slave
