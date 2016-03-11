@@ -6,7 +6,8 @@ import Data.ByteString.Lazy as B
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
-import Data.Time.Clock.POSIX
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Ratio
 
 import Network as NETWORK
 import Network.Socket as SOCKET
@@ -17,21 +18,22 @@ import Control.Exception
 
 import KVProtocol
 
-writeKVList :: [(KVKey, (KVVal, Int))] -> B.ByteString
+writeKVList :: [(KVKey, (KVVal, KVTime))] -> B.ByteString
 writeKVList kvstore = C8.intercalate (C8.pack "\n") $ Prelude.map helper kvstore
   where helper (k,(v,ts)) = C8.concat [C8.pack (show ts), C8.pack ":", k, C8.pack "=", v]
 
-readKVList :: B.ByteString -> [(KVKey, (KVVal, Int))]
+readKVList :: B.ByteString -> [(KVKey, (KVVal, KVTime))]
 readKVList = Prelude.map parseField . C8.lines
   where parseField line =
           let (ts, kv) = C8.break (== ':') line
-              ts_int = read (C8.unpack ts) :: Int
+              ts_int = read (C8.unpack ts) :: KVTime
               (k, v) = C8.break (== '=') (C8.drop 1 kv)
           in (k, (C8.drop 1 v, ts_int))
 
 --https://stackoverflow.com/questions/17909770/get-time-as-int
-currentTimeInt :: IO Int
-currentTimeInt = round `fmap` getPOSIXTime :: IO Int
+--microseconds
+currentTimeMicro :: IO Integer
+currentTimeMicro = numerator . toRational . (* 1000000) <$> getPOSIXTime
 
 getFreeSocket :: IO Socket
 getFreeSocket = do

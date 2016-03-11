@@ -27,17 +27,17 @@ import Control.Monad.Reader
 import Control.Monad.Catch as Catch
 import Control.Concurrent
 import Control.Concurrent.Chan
+import Control.Concurrent.Thread.Delay
 
 import System.Directory as DIR
 
-import qualified KVProtocol (getMessage, sendMessage, kV_TIMEOUT)
+import qualified KVProtocol (getMessage, sendMessage, kV_TIMEOUT_MICRO)
 import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
 
 import Debug.Trace
 
 import qualified Utils as U
 
-type Time = Int
 type SlvId = Int
 
 -- type KVMap a = Map.Map KVTxnId (Set.Set a)
@@ -69,7 +69,7 @@ data TXState = VOTE | ACK | RESPONSE
 data TX = TX {
   txState :: TXState,
   responded :: S.Set SlvId,
-  timeout :: Time,
+  timeout :: KVTime,
   message :: KVMessage
 }
  deriving (Show)
@@ -151,7 +151,7 @@ processMessage kvMsg@(KVResponse tid sid _) = do
   -- if complete then clearAcksTX tid else return ()
 
 processMessage kvMsg@(KVRequest tid req) = do
-  now <- liftIO U.currentTimeInt
+  now <- liftIO U.currentTimeMicro
   let txstate = case req of
         GetReq{} -> RESPONSE
         PutReq{} -> VOTE
@@ -184,17 +184,17 @@ processMessage _ = undefined
 
 timeoutThread :: MState MasterState IO ()
 timeoutThread = get >>= \s -> do
-  liftIO $ IO.putStrLn "[!] TIMING OUT..."
+  --liftIO $ IO.putStrLn "[!] TIMING OUT..."
 --  liftIO $ traceIO "Timing out! in timeout thread!"
   -- TODO: timeout transactions individually
    -- mapM_ (\(txn_id,(ts,msg)) -> do
-   --         if (now - KVProtocol.kV_TIMEOUT >= ts)
+   --         if (now - KVProtocol.kV_TIMEOUT_MICRO >= ts)
    --         then sendDecisionToRing (KVDecision txn_id DecisionAbort (request msg))
    --         else liftIO $ return ()
    --       ) Map.toList $ txs s 
-  now <- liftIO $ U.currentTimeInt
+  now <- liftIO $ U.currentTimeMicro
   mapM_ (\(tid, tx) ->
-          if (now - KVProtocol.kV_TIMEOUT >= timeout tx) 
+          if (now - KVProtocol.kV_TIMEOUT_MICRO >= timeout tx) 
           then do
             if (txState tx == ACK)
               then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
@@ -205,7 +205,7 @@ timeoutThread = get >>= \s -> do
 
   -- mapM clearTX (L.map fst timedOutTxns)
 
-  liftIO $ threadDelay 1000000
+  liftIO $ delay (KVProtocol.kV_TIMEOUT_MICRO)
   timeoutThread
 
 slaveResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
@@ -225,9 +225,9 @@ timedOut :: KVTxnId -> MState MasterState IO Bool
 timedOut tid = get >>= \s -> liftIO $ do
   let tx = lookupTX tid s
       tx' = fromJust tx
-  now <- U.currentTimeInt
+  now <- U.currentTimeMicro
   if isJust tx
-  then return $ now - KVProtocol.kV_TIMEOUT >= timeout tx'
+  then return $ now - KVProtocol.kV_TIMEOUT_MICRO >= timeout tx'
   else return False
 
 clearTX :: KVTxnId -> MState MasterState IO ()
@@ -257,7 +257,7 @@ sendDecisionToRing msg@(KVDecision tid decision req) = get >>= \s -> do
   -- Note: this should not already exist in map TODO?
   -- modifyM_ $ \s -> clearResponded tid s
   shard <- consistentHashing msg
---  mapM_ (\n -> forkM_ $ forwardToSlaveRetry n msg KVProtocol.kV_TIMEOUT) shard
+--  mapM_ (\n -> forkM_ $ forwardToSlaveRetry n msg KVProtocol.kV_TIMEOUT_MICRO) shard
   let tx = lookupTX (txn_id msg) s
       tx' = fromJust tx
 

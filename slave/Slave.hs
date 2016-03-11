@@ -49,7 +49,7 @@ data SlaveState = SlaveState {
                   sock :: NETWORK.Socket
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
-                , store :: Map.Map KVKey (KVVal, Int)
+                , store :: Map.Map KVKey (KVVal, KVTime)
                 , unresolvedTxns :: Map.Map KVTxnId KVMessage
                 , recoveredTxns :: Map.Map KVTxnId KVMessage
                 }
@@ -159,7 +159,7 @@ checkpoint = get >>= \s -> do
                                       (Utils.writeKVList $ Map.toList (store s))
                    )
 
-  liftIO $ threadDelay 5000000
+  liftIO $ threadDelay 10000000
   checkpoint
 
 processMessages :: MState SlaveState IO ()
@@ -235,7 +235,7 @@ handleRequest msg = get >>= \s -> do
 
   liftIO $ IO.hClose h
 
-safeUpdateStore :: KVKey -> KVVal -> Int -> MState SlaveState IO ()
+safeUpdateStore :: KVKey -> KVVal -> KVTime -> MState SlaveState IO ()
 safeUpdateStore k v ts = modifyM_ $ \s -> do
   let oldVal = Map.lookup k (store s)
 

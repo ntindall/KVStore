@@ -33,7 +33,7 @@ getSeparator = " " --todo, escaping?
 writeReady :: FilePath -> KVMessage -> IO()
 writeReady filename msg = do
   -- LOG READY, <timestamp, txn_id, key, newval>
-  -- time <- Utils.currentTimeInt
+  -- time <- Utils.currentTimeMicro
   let field_txn = txn_id msg
       field_request = request msg
       field_issuedUTC = issuedUTC field_request --use the timestamp the request was made
@@ -50,7 +50,7 @@ flush filename = B.writeFile filename B.empty
 writeCommit :: FilePath -> KVMessage -> IO()
 writeCommit filename msg = do
   -- LOG COMMIT, <timestamp, txn_id>
-  time <- Utils.currentTimeInt
+  time <- Utils.currentTimeMicro
   let field_txn = txn_id msg
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "COMMIT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
@@ -60,7 +60,7 @@ writeCommit filename msg = do
 writeAbort :: FilePath -> KVMessage -> IO()
 writeAbort filename msg = do
   -- LOG ABORT, <timestamp, txn_id>
-  time <- Utils.currentTimeInt
+  time <- Utils.currentTimeMicro
   let field_txn = txn_id msg
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "ABORT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
@@ -70,7 +70,7 @@ writeAbort filename msg = do
 
 --rebuild the in memory store using the log, redoing all committed actions that
 --occured after a checkpoint
-rebuild :: FilePath -> Map.Map KVKey (KVVal, Int) -> IO (Map.Map KVTxnId KVMessage, Map.Map KVKey (KVVal, Int))
+rebuild :: FilePath -> Map.Map KVKey (KVVal, KVTime) -> IO (Map.Map KVTxnId KVMessage, Map.Map KVKey (KVVal, KVTime))
 rebuild logPath oldStore = do
 
   file <- B.readFile logPath
@@ -82,15 +82,15 @@ rebuild logPath oldStore = do
 
   return (Map.fromList $ List.map (\(txn_id,(k,v,ts)) -> 
                                     let txn_id' = read (C8.unpack txn_id) :: (Int, Int)
-                                        ts_int  = read (C8.unpack ts)     :: Int
+                                        ts_int  = read (C8.unpack ts)     :: KVTime
                                     in (txn_id', KVRequest txn_id' (PutReq ts_int k v))
                                   ) unfinishedReqList
          , updatedStore)
 
 handleLines :: [B.ByteString]                      --each line in the file
             -> Map.Map B.ByteString (KVKey, KVVal, B.ByteString) --unmatched ready map accumulator
-            -> Map.Map KVKey (KVVal, Int)               --store accumulator
-            -> IO(Map.Map B.ByteString (KVKey, KVVal, B.ByteString), Map.Map KVKey (KVVal, Int))
+            -> Map.Map KVKey (KVVal, KVTime)               --store accumulator
+            -> IO(Map.Map B.ByteString (KVKey, KVVal, B.ByteString), Map.Map KVKey (KVVal, KVTime))
 handleLines [] unmatchedReadyMap storeMap = return (unmatchedReadyMap, storeMap)
 handleLines (x:xs) unmatchedReadyMap storeMap 
   | C8.null x = handleLines xs unmatchedReadyMap storeMap
@@ -112,7 +112,7 @@ handleLines (x:xs) unmatchedReadyMap storeMap
         case Map.lookup txn_id unmatchedReadyMap of
           (Just (k,v,ts)) -> do
             let oldVal = Map.lookup k storeMap
-                ts_int = read (C8.unpack ts) :: Int
+                ts_int = read (C8.unpack ts) :: KVTime
             
             if isNothing oldVal || snd (fromJust oldVal) <= ts_int
             then handleLines xs (Map.delete txn_id unmatchedReadyMap) 

@@ -42,6 +42,8 @@ executable kvstore-master
                      , containers >= 0.5
                      , MissingH
                      , directory
+                     , concurrent-extra >= 0.5
+                     , unbounded-delays
   default-language:    Haskell2010
 
 executable kvstore-slave

@@ -1,5 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+
 
 module KVProtocol
   (
@@ -11,7 +14,8 @@ module KVProtocol
   , KVKey
   , KVVal
   , KVTxnId
-  , kV_TIMEOUT
+  , KVTime
+  , kV_TIMEOUT_MICRO
   , getMessage
   , sendMessage
   , connectToMaster
@@ -24,6 +28,8 @@ import Debug.Trace
 
 import GHC.Generics (Generic)
 
+import Data.Time.Clock
+
 import Network
 import System.IO as IO
 import Rainbow as Rainbow
@@ -33,15 +39,16 @@ import qualified Lib
 type KVKey = B.ByteString
 type KVVal = B.ByteString
 type KVTxnId = (Int, Int) -- (client_id, txn_id)
+type KVTime = Integer
 
 -- TODO, with more clients, need txn_id to be (txn_id, client_id) tuples
 
 data KVRequest = GetReq {
-                  issuedUTC :: Int
+                  issuedUTC :: KVTime
                 , reqkey :: KVKey
                 }
                | PutReq {
-                  issuedUTC :: Int
+                  issuedUTC :: KVTime
                 , putkey :: KVKey
                 , putval :: KVVal
                 }
@@ -100,8 +107,9 @@ instance Serialize KVResponse
 instance Serialize KVDecision
 instance Serialize KVVote
 
-kV_TIMEOUT :: Int
-kV_TIMEOUT = 10
+--MICROSECONDS
+kV_TIMEOUT_MICRO :: KVTime
+kV_TIMEOUT_MICRO = 1000000
 
 decodeMsg :: B.ByteString -> Either String KVMessage
 decodeMsg = CEREAL.decodeLazy
