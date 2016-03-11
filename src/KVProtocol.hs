@@ -2,7 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeSynonymInstances #-}
-
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module KVProtocol
   (
@@ -25,6 +25,8 @@ import Data.Serialize as CEREAL
 import Data.ByteString.Lazy  as B
 import Data.ByteString.Char8 as C8
 import Debug.Trace
+import Control.Exception
+import Control.Concurrent
 
 import GHC.Generics (Generic)
 
@@ -137,7 +139,11 @@ sendMessage h msg = do
   Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow
 
 connectToMaster :: Lib.Config -> IO Handle
-connectToMaster cfg = connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg)
+connectToMaster cfg = catch (connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg))
+                            (\(e :: SomeException) -> do
+                              threadDelay 1000000
+                              connectToMaster cfg
+                            )
 
 prettyPrint :: KVMessage -> Radiant
 prettyPrint m = case m of

@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module ClientLib
     ( registerWithMaster
@@ -55,7 +56,14 @@ instance Show (ClientState) where
 listen :: MasterHandle -> IO()
 listen mvar = do
   state <- readMVar mvar
-  (h, _, _) <- NETWORK.accept (skt state)
+
+  let establishListen = catch (NETWORK.accept (skt state))
+                          (\(e:: SomeException) -> do
+                            threadDelay 1000000
+                            establishListen
+                          )
+  (h, _, _) <- establishListen
+
   response <- KVProtocol.getMessage h
   IO.hClose h
 

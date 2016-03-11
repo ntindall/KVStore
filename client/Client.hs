@@ -26,7 +26,7 @@ main :: IO ()
 main = Lib.parseArguments >>= \(Just config) -> do
   masterH <- CL.registerWithMaster config
 
-  children <- issueNRequests masterH 100 []
+  children <- issueNRequests masterH 1000 []
 
   mapM_ takeMVar children
   --todo, unregisted
