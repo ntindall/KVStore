@@ -63,24 +63,29 @@ cLIissueRequests mH = do
   else do
     let request' = fromJust request
     case request' of
-      (Left k) -> do
-        CL.delVal mH k >>= (\_ -> return ())
-      (Right (k,v)) -> do 
-        CL.putVal mH k v 
+      (PutReq _ k v) -> do
+        CL.putVal mH k v >>= (\_ -> return ())
+      (DelReq _ k) -> do 
+        CL.delVal mH k
+      (GetReq _ k) -> do
+        CL.getVal mH k >>= (\_ -> return ())
     return ()
 
   cLIissueRequests mH
 
-parseInput :: B.ByteString -> IO(Maybe (Either KVKey (KVKey, KVVal)))
+parseInput :: B.ByteString -> IO(Maybe KVRequest)
 parseInput text = do
+
   let pieces = C8.split ' ' text
   if Prelude.length pieces > 1
   then let reqType = Prelude.head pieces
            key = pieces !! 1
            val | Prelude.length pieces >= 3 = pieces !! 2
                | otherwise = B.empty
-               
-           in if reqType == "PUT" || reqType == "put"
-              then return $ Just (Right (key, val))
-              else return $ Just (Left key)
+
+          in return $ case reqType of
+                        "PUT" -> Just $ PutReq 0 key val
+                        "GET" -> Just $ GetReq 0 key
+                        "DEL" -> Just $ DelReq 0 key   
+                        _     -> Nothing        
   else return Nothing

@@ -143,8 +143,8 @@ processMessage kvMsg@(KVResponse tid sid _) = do
   --when complete $ do
 
   --forward first response to client, delete from map
-  sendMsgToClient kvMsg
-  clearTX tid
+  complete <- isComplete tid
+  if complete then sendMsgToClient kvMsg >>= (\_ -> clearTX tid) else (liftIO $ return ())
 
   -- TODO: add timeout for get reqs
   -- addAck tid sid
