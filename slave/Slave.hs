@@ -22,6 +22,7 @@ import Control.Exception
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Monad.Reader
+import Control.Monad.Catch as Catch
 import Control.Arrow as CA
 
 import Control.Monad
@@ -29,8 +30,8 @@ import Control.Concurrent.MState
 
 import Debug.Trace
 
-import qualified KVProtocol (getMessage, sendMessage, connectToMaster)
-import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
+import qualified KVProtocol (getMessage, sendMessage, connectToHost)
+import KVProtocol hiding (getMessage, sendMessage, connectToHost)
 
 import Log as LOG
 import qualified Utils
@@ -45,13 +46,13 @@ import System.FileLock
 type SlaveId = Int
 
 data SlaveState = SlaveState {
-                  channel :: Chan KVMessage
+                  receiver :: SOCKET.Socket
+                , channel :: Chan KVMessage
                 , cfg :: Lib.Config
                 , store :: Map.Map KVKey (KVVal, KVTime)
                 , unresolvedTxns :: Map.Map KVTxnId KVMessage
                 , recoveredTxns :: Map.Map KVTxnId KVMessage
-                , receiver :: Handle
-                , sender :: MVar Handle
+                , sender :: MVar Socket
                 }
  --  deriving (Show)
 
@@ -79,20 +80,6 @@ main = do
           installHandler sigABRT handler Nothing
           main_ >>= (\_ -> return ())
 
-listenOnPort :: PortNumber -> IO NETWORK.Socket
-listenOnPort port = do
-  proto <- BSD.getProtocolNumber "tcp"
-  bracketOnError
-    (SOCKET.socket AF_INET Stream proto)
-    SOCKET.sClose
-    (\sock -> do
-        SOCKET.setSocketOption sock ReuseAddr 1
-        SOCKET.setSocketOption sock ReusePort 1
-        SOCKET.bindSocket sock (SockAddrInet port iNADDR_ANY)
-        SOCKET.listen sock maxListenQueue
-        return sock
-    )
-
 
 runKVSlave :: MState SlaveState IO ()
 runKVSlave = get >>= \s -> do 
@@ -103,7 +90,7 @@ runKVSlave = get >>= \s -> do
   let config = cfg s
       slaveId = fromJust $ Lib.slaveNumber config
       (slaveName, slavePortId@(PortNumber portNum)) = Lib.slaveConfig config !! slaveId
-  skt <- liftIO $ listenOnPort portNum -- $ listenOn slavePortId
+  skt <- liftIO $ KVProtocol.listenOnPort portNum -- $ listenOn slavePortId
 
   fileExists <- liftIO $ DIR.doesFileExist (LOG.persistentLogName slaveId)
   if fileExists
@@ -129,11 +116,12 @@ runKVSlave = get >>= \s -> do
     return ()
   liftIO $ IO.putStrLn "[!] DONE REBUILDING... "
 
-  sndr <- liftIO $ KVProtocol.connectToMaster config
-  rcvr <- liftIO $ fmap fst3 (NETWORK.accept skt)
+  sndr <- liftIO $ do
+    s <- KVProtocol.connectToHost (Lib.masterHostName config)
+                                  (Lib.masterPortId config)
+    newMVar s
 
-  modifyM_ $ \s -> s { sender = newMVar sndr
-                     , receiver = rcvr }
+  modifyM_ $ \s -> s { receiver = skt, sender = sndr }
 
   forkM_ sendResponses
   forkM_ checkpoint
@@ -170,15 +158,19 @@ checkpoint = get >>= \s -> do
 
 processMessages :: MState SlaveState IO ()
 processMessages = get >>= \s -> do
-  let rcvr = receiver s
-      c = channel s
-
-  msg <- liftIO $ KVProtocol.getMessage rcvr
-  liftIO $ either (\err -> IO.putStr $ show err ++ "\n")
-                  (\suc -> writeChan c suc)
-                  msg
-
+  liftIO $ do
+    let process = either (IO.putStr . show . (++ "\n")) (writeChan $ channel s)
+    Catch.bracket
+      (SOCKET.accept $ receiver s) 
+      (return)
+      (\(conn, _) -> do
+        h <- SOCKET.socketToHandle conn ReadMode
+        KVProtocol.getMessage h >>= process
+        hClose h
+      )
+  
   processMessages
+
 
 
 persistentFileName :: Int -> String  --todo, hacky

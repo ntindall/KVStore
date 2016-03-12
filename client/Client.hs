@@ -15,8 +15,7 @@ import qualified ClientLib as CL
 import qualified Utils as Utils
 import qualified Lib as Lib
 
-import qualified KVProtocol (getMessage, sendMessage, connectToMaster)
-import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
+import KVProtocol
 
 import Math.Probable
 
@@ -26,32 +25,31 @@ main :: IO ()
 main = Lib.parseArguments >>= \(Just config) -> do
   masterH <- CL.registerWithMaster config
 
-  cLIissueRequests masterH
+  --cLIissueRequests masterH
 
-  --children <- issueNRequests masterH 1000 []
+  children <- issueNRequests masterH 2 []
 
-  --mapM_ takeMVar children
-  --todo, unregisted
+  mapM_ takeMVar children
 
---issueNRequests :: CL.MasterHandle -> Int -> [MVar ()] -> IO ([MVar ()])
---issueNRequests mH n mvars
---  | n == 0 = return mvars
---  | otherwise = do
---    let request = createRequest n
---    m <- newEmptyMVar 
---    tid <- forkFinally (case request of
---                      (Left k) -> do
---                        CL.getVal mH k
---                        return ()
---                      (Right (k,v)) -> do 
---                        CL.putVal mH k v
---                        return ()
---                  ) (\_ -> putMVar m ())
+issueNRequests :: CL.MasterHandle -> Int -> [MVar ()] -> IO ([MVar ()])
+issueNRequests mH n mvars
+  | n == 0 = return mvars
+  | otherwise = do
+    let request = createRequest n
+    m <- newEmptyMVar 
+    tid <- forkFinally (case request of
+                      (Left k) -> do
+                        CL.getVal mH k
+                        return ()
+                      (Right (k,v)) -> do 
+                        CL.putVal mH k v
+                        return ()
+                  ) (\_ -> putMVar m ())
 
---    issueNRequests mH (n - 1) (mvars ++ [m])
+    issueNRequests mH (n - 1) (mvars ++ [m])
 
---createRequest n = let nBstring = C8.pack $ show n 
---                  in Right (nBstring, nBstring)
+createRequest n = let nBstring = C8.pack $ show n 
+                  in Right (nBstring, nBstring)
 
 cLIissueRequests :: CL.MasterHandle -> IO ()
 cLIissueRequests mH = do

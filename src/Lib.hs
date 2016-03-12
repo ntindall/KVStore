@@ -48,7 +48,7 @@ parseArguments = do
       let (isLocal, n, slaveN) = parseOptions options
           slaveCfg = allocSlaves isLocal n
       in case isLocal of
-        True -> return $ Just Config { masterHostName = "localHost"
+        True -> return $ Just Config { masterHostName = "127.0.0.1"
                                      , masterPortId   = PortNumber 1063
                                      , clientConfig   = [] --TODO ALLOW DYNAMIC REGISTRATION OF CLIENTS
                                      , slaveConfig    = slaveCfg
@@ -73,6 +73,6 @@ parseOptions l = optionsAcc l (False, 1, Nothing)
 allocSlaves :: Bool                                --is the configuration local?
             -> Int                                 --ring size
             -> [(HostName, PortID)]
-allocSlaves True n  = zip (replicate n "localhost") (map PortNumber [1064..])
+allocSlaves True n  = zip (replicate n "127.0.0.1") (map PortNumber [1064..])
 allocSlaves False _ = undefined --not implemented yet
 
