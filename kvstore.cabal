@@ -36,6 +36,7 @@ executable kvstore-master
                      , kvstore
                      , network
                      , bytestring
+                     , lens
                      , mtl
                      , mstate
                      , exceptions

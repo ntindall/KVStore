@@ -1,6 +1,7 @@
-
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+
 module Main where
 
 import Lib
@@ -17,6 +18,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as S
 import qualified Data.Sequence as Seq
 import qualified Data.Foldable as Foldable
+
+import Control.Lens
 
 import Data.Maybe
 
@@ -50,27 +53,16 @@ data MasterState = MasterState {
                 , cfg :: Lib.Config
                   --the votemap contains as a key the txn id, and has as a value
                   --the set of slaves that have responded with a READY vote
-                , txs :: Map.Map KVTxnId TX
-                -- , voteMap :: Map.Map KVTxnId (Set.Set Int)
-                -- , voteMap :: KVMap Int
-                --   --the ackMap contains as a key the txn id, and has as a value
-                --   --the set of slaves that have responded with an ACK
-                --   --
-                --   --when the last ACK is received, the master removes the txn_id
-                --   --from both Maps and sends an acknowledgement to the client.
-                -- , ackMap  :: KVMap Int
-                --   --timeout map. Map from transaction id to when the server first
-                --   --sent a KVRequest to a shard
-                -- , timeoutMap :: Map.Map KVTxnId (Int, KVMessage)
+                , _txs :: Map.Map KVTxnId TX
                 }
                    
 data TXState = VOTE | ACK | RESPONSE
   deriving (Show, Eq, Ord)
 
 data TX = TX {
-  txState :: TXState,
-  responded :: S.Set SlvId,
-  timeout :: KVTime,
+  _txState :: TXState,
+  _responded :: S.Set SlvId,
+  _timeout :: KVTime,
   message :: KVMessage
 }
  deriving (Show)
@@ -80,6 +72,9 @@ data KVSlave = KVSlave { slvID :: Int , host :: HostName,  port :: PortID }
 instance Show (MasterState) where
   show (MasterState skt _ cfg txs) = 
     show skt ++ show cfg ++ show txs
+
+makeLenses ''MasterState
+makeLenses ''TX
 
 -- Entry Point
 main :: IO ()
@@ -130,9 +125,12 @@ processMessage (KVVote tid sid VoteReady request) = do
   timeout <- timedOut tid
 
   when (commit || timeout) $ modifyM_ $ \s -> do
-    let tx = lookupTX tid s
-        tx' = fromJust tx
-    if (isJust tx) then updateTX tid (tx' { responded = S.empty, txState = ACK }) s else s
+    let tx = (txState .~ ACK) <$> (responded .~ S.empty) <$> lookupTX tid s
+    updateTX tid tx s
+
+    -- let tx = lookupTX tid s
+    --     tx' = fromJust tx
+    -- if (isJust tx) then updateTX tid (tx' { responded = S.empty, txState = ACK }) s else s
 
   if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
   else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
@@ -196,13 +194,13 @@ timeoutThread = get >>= \s -> do
    --       ) Map.toList $ txs s 
   now <- liftIO $ U.currentTimeMicro
   mapM_ (\(tid, tx) ->
-          if (now - KVProtocol.kV_TIMEOUT_MICRO >= timeout tx) 
+          if (now - KVProtocol.kV_TIMEOUT_MICRO >= tx ^. timeout) 
           then do
-            if (txState tx == ACK)
+            if (tx ^. txState == ACK)
               then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
             else sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout"))) -- else is VOTE or RESPONSE
           else return ()
-        ) $ Map.toList $ txs s
+        ) $ Map.toList $ s ^. txs
   --todo, may need to put this into modifyM_ 
 
   -- mapM clearTX (L.map fst timedOutTxns)
@@ -211,17 +209,22 @@ timeoutThread = get >>= \s -> do
   timeoutThread
 
 slaveResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
-slaveResponded tid slvId = modifyM_ $ \s -> do
-  let tx = lookupTX tid s
-      tx' = fromJust tx
-  if isJust tx then updateTX tid (tx' { responded = S.insert slvId (responded tx') }) s else s 
+slaveResponded tid slvId = modifyM_ $ \s ->
+  updateTX tid (lookupTX tid s <&> responded %~ S.insert slvId) s
+
+      -- if isJust tx then tx' &  else s
+
+
+  --     tx' = fromJust tx
+  -- if isJust tx then updateTX tid (tx' { responded = S.insert slvId (responded tx') }) s else s 
 
 -- todo: change bakc to Ord a => KVMap a later
 isComplete :: KVTxnId -> MState MasterState IO Bool
-isComplete tid = get >>= \s -> do
-  let tx = lookupTX tid s
-      tx' = fromJust tx
-  if isJust tx then return $ S.size (responded tx') == 2 else return False
+isComplete tid = get >>= \s -> pure $ (S.size <$> (^. responded) <$> lookupTX tid s ) == Just 2
+
+  -- let tx = lookupTX tid s
+  --     tx' = fromJust tx
+  -- if isJust tx then return $ S.size (responded tx') == 2 else return False
 
 timedOut :: KVTxnId -> MState MasterState IO Bool
 timedOut tid = get >>= \s -> liftIO $ do
@@ -229,30 +232,37 @@ timedOut tid = get >>= \s -> liftIO $ do
       tx' = fromJust tx
   now <- U.currentTimeMicro
   if isJust tx
-  then return $ now - KVProtocol.kV_TIMEOUT_MICRO >= timeout tx'
+  then return $ now - KVProtocol.kV_TIMEOUT_MICRO >= tx' ^. timeout
   else return False
 
 clearTX :: KVTxnId -> MState MasterState IO ()
-clearTX tid = modifyM_ $ \s -> s { txs = Map.delete tid $ txs s }
+clearTX tid = modifyM_ $ txs %~ Map.delete tid
+
+-- \s -> s { txs = Map.delete tid $ txs s }
+ -- clearTX tid = modifyM_ $ \s -> s { txs = Map.delete tid $ txs s }
 
 addTX :: KVTxnId -> TX -> MasterState -> MasterState
-addTX tid tx s = s { txs = Map.insert tid tx (txs s) }
+addTX tid tx = txs %~ Map.insert tid tx
+  -- s { txs = Map.insert tid tx (txs s) }
 
 -- containsTX :: KVTxnId -> MasterState -> Bool
 -- containsTX tid s = if isNothing (Map.lookup tid $ txs s) then False else True
 
 lookupTX :: KVTxnId -> MasterState -> Maybe TX
-lookupTX tid s = Map.lookup tid $ txs s
+lookupTX tid s = Map.lookup tid $ s ^. txs
 
 -- updateTX, mutates the state, must be called within a mutateM_ block
-updateTX :: KVTxnId -> TX -> MasterState -> MasterState
-updateTX tid tx s = s { txs = Map.insert tid tx (txs s) }
+updateTX :: KVTxnId -> Maybe TX -> MasterState -> MasterState
+updateTX _ Nothing = id
+updateTX tid (Just tx) = txs %~ Map.insert tid tx
+-- updateTX tid tx s = s { txs = Map.insert tid tx (txs s) }
 
 clearResponded :: KVTxnId -> MasterState -> MasterState
-clearResponded tid s = do
-  let tx = lookupTX tid s
-      tx' = fromJust tx
-  if isJust tx then updateTX tid (tx' { responded = S.empty }) s else s
+clearResponded tid s = updateTX tid ((responded .~ S.empty) <$> lookupTX tid s) s
+
+  -- let tx = lookupTX tid s
+  --     tx' = fromJust tx
+  -- if isJust tx then updateTX tid (tx' { responded = S.empty }) s else s
 
 sendDecisionToRing :: KVMessage -> MState MasterState IO ()
 sendDecisionToRing msg@(KVDecision tid decision req) = get >>= \s -> do
@@ -263,7 +273,10 @@ sendDecisionToRing msg@(KVDecision tid decision req) = get >>= \s -> do
   let tx = lookupTX (txn_id msg) s
       tx' = fromJust tx
 
-  if isJust tx then mapM_ (\n -> if (not . S.member (slvID n) $ responded $ tx') then forkM_ $ forwardToSlave n msg else return ()) shard
+  if isJust tx
+  then mapM_ (\n ->
+    if (not . S.member (slvID n) $ tx' ^. responded)
+    then forkM_ $ forwardToSlave n msg else return ()) shard
   else return ()
 
 consistentHashing :: KVMessage -> MState MasterState IO [KVSlave]
@@ -291,7 +304,7 @@ forwardToSlaveRetry slv msg timeout = get >>= \s -> do
   -- We can stop resending if we've received an ack from the node
   let tx = lookupTX (txn_id msg) s
       tx' = fromJust tx
-      forwardNeeded = not . S.member (slvID slv) $ responded $ tx'
+      forwardNeeded = not . S.member (slvID slv) $ tx' ^. responded
   if isJust tx && forwardNeeded then do
     forwardToSlave slv msg
     -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
@@ -319,15 +332,18 @@ forwardToSlave slv msg = do
 tryConnect :: KVSlave -> KVMessage -> MState MasterState IO (Maybe Handle)
 tryConnect slv msg = do
   result <- liftIO $ Catch.try $ connectTo (host slv) (port slv)
+  let tid = txn_id msg
   case result of
     Left (e :: SomeException) -> do
       -- the connection time out, meaning that the transaction should be aborted.
       -- mark this in the timeout map so the timeout thread behaves appropriately.
-      modifyM_ $ \s -> do
-        let tx = lookupTX (txn_id msg) s
-            tx' = fromJust tx
-        if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
+      modifyM_ $ \s -> updateTX tid (lookupTX tid s <&> timeout .~ 0) s
       return Nothing
+
+      --   let tx = lookupTX (txn_id msg) s
+      --       tx' = fromJust tx
+      --   if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
+      -- return Nothing
 
     Right h -> liftIO $ return (Just h)
 
