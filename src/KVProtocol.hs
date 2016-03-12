@@ -172,7 +172,7 @@ connectToHost hostname pid@(PortNumber pno) =
   catch (do
     hostEntry <- BSD.getHostByName hostname
 
-    sock <- SOCKET.socket AF_INET Stream 0
+    sock <- SOCKET.socket AF_INET Stream defaultProtocol
 
     SOCKET.setSocketOption sock KeepAlive 1
     SOCKET.connect sock (SockAddrInet pno (hostAddress hostEntry))
@@ -190,7 +190,7 @@ listenOnPort port = do
   catch (do
     proto <- BSD.getProtocolNumber "tcp"
     bracketOnError
-      (SOCKET.socket AF_INET Stream proto)
+      (SOCKET.socket AF_INET Stream defaultProtocol)
       SOCKET.sClose
       (\sock -> do
           SOCKET.setSocketOption sock ReuseAddr 1
