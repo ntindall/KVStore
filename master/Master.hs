@@ -130,16 +130,13 @@ listen = get >>= \s -> do
     IO.putStrLn $ show (receiver s)
     let process = either (IO.putStr . show . (++ "\n")) (writeChan $ channel s)
     
-    Catch.bracket
-      (SOCKET.accept $ receiver s) 
-      (return)
-      (\(conn, _) -> do
-        isC <- isConnected conn
-        traceIO $ show isC
-        h <- SOCKET.socketToHandle conn ReadMode
-        KVProtocol.getMessage h >>= process
-        hClose h
-      )
+    (conn,_ ) <- (SOCKET.accept $ receiver s) 
+    isC <- isConnected conn
+    traceIO $ show isC
+    h <- SOCKET.socketToHandle conn ReadMode
+    KVProtocol.getMessage h >>= process
+    hClose h
+      
   liftIO $ IO.putStr "recursing"
   listen
 
