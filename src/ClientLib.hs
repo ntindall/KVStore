@@ -94,7 +94,7 @@ listen mvar = do
 registerWithMaster :: Lib.Config -> IO (MasterHandle)
 registerWithMaster cfg = do
   --Allocate a socket on the client for communication with the master
-  receiver <- Utils.getFreeSocket
+  receiver <- KVProtocol.listenOnPort aNY_PORT
 
   sender <- KVProtocol.connectToHost (Lib.masterHostName cfg) (Lib.masterPortId cfg)
   senderMVar <- newMVar sender

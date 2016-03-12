@@ -98,25 +98,25 @@ main = Lib.parseArguments >>= \args -> case args of
     DIR.createDirectory "database"
     DIR.createDirectory "database/logs"
     ---------------------------------
-    let pid@(PortNumber pno) = Lib.masterPortId c
+    let slaves = L.mapAccumL (\i (h,p) -> (i+1, KVSlave i h p)) 0 (slaveConfig $ c)
 
-    ms <- MasterState <$> (KVProtocol.listenOnPort pno) <*> newChan
-    execMState initMaster $ ms c Map.empty Map.empty Map.empty
+    slaves' <- mapM (\slv -> do
+                  s <- liftIO $ KVProtocol.connectToHost (host slv) (port slv)
+                  m <- liftIO $ newMVar s
+
+                  liftIO $ return (slvID slv, m)
+               ) (snd slaves)
+
+    let pid@(PortNumber pno) = Lib.masterPortId c
+    recvSock <- KVProtocol.listenOnPort pno
+    chan <- newChan
+
+    execMState initMaster (MasterState recvSock chan c Map.empty Map.empty (Map.fromList slaves'))
     return ()
 
 -- Initialization for Master Node
 initMaster :: MState MasterState IO ()
 initMaster = get >>= \s -> do
-  let slaves = L.mapAccumL (\i (h,p) -> (i+1, KVSlave i h p)) 0 (slaveConfig $ cfg s)
-
-  slaves' <- mapM (\slv -> do
-                s <- liftIO $ KVProtocol.connectToHost (host slv) (port slv)
-                m <- liftIO $ newMVar s
-
-                liftIO $ return (slvID slv, m)
-             ) (snd slaves)
-
-  modifyM_ $ \s -> s { slvHMap = Map.fromList slaves' }
 
   forkM_ $ listen
   forkM_ $ timeoutThread
