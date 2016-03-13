@@ -121,7 +121,7 @@ instance Serialize KVVote
 
 --MICROSECONDS
 kV_TIMEOUT_MICRO :: KVTime
-kV_TIMEOUT_MICRO = 1000000
+kV_TIMEOUT_MICRO = 3000000
 
 decodeMsg :: B.ByteString -> Either String KVMessage
 decodeMsg = CEREAL.decodeLazy
@@ -129,7 +129,6 @@ decodeMsg = CEREAL.decodeLazy
 getMessage :: Handle -> IO(Either String KVMessage)
 getMessage h = do
   bytes <- C8.hGetLine h
-  traceIO $ show bytes   
   if C8.null bytes
   then return $ Left "Handle is empty"
   else do
@@ -148,11 +147,8 @@ sendMessage :: MVar Socket -> KVMessage -> IO ()
 sendMessage h msg = do
   let assert sendSock = do 
         bool <- SOCKET.isWritable sendSock
-        IO.putStr $ show bool
         suc <- SOCKETBSTRING.send sendSock (toStrict ((CEREAL.encodeLazy msg) `B.append` "\n"))
-        traceIO $ show suc
         if (suc > 0) then return () else do
-          IO.putStrLn "Retrying"
           assert sendSock
 
   withMVar h (\s -> do

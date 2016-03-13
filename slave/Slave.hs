@@ -161,6 +161,7 @@ listen :: MState SlaveState IO ()
 listen = get >>= \s -> do
   h <- liftIO $ do
     (conn,_) <- SOCKET.accept $ receiver s
+    IO.putStrLn "[!] New connection established!"
     socketToHandle conn ReadMode 
 
   forkM_ (channelWriter h)
@@ -170,10 +171,13 @@ listen = get >>= \s -> do
 channelWriter :: Handle -> MState SlaveState IO ()
 channelWriter h = get >>= \s -> do
   liftIO $ do
-    message <- KVProtocol.getMessage h
-    either (IO.putStr . show . (++ "\n")) 
-           (writeChan $ channel s)
-           message
+    isEOF <- hIsEOF h
+    if isEOF then return ()
+    else do
+      message <- KVProtocol.getMessage h
+      either (IO.putStr . show . (++ "\n")) 
+             (writeChan $ channel s)
+             message
   
   channelWriter h 
 

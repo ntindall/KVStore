@@ -117,6 +117,7 @@ main = Lib.parseArguments >>= \args -> case args of
 -- Initialization for Master Node
 initMaster :: MState MasterState IO ()
 initMaster = get >>= \s -> do
+  liftIO $ IO.putStrLn "[!] Initializing Master"
 
   forkM_ $ listen
   forkM_ $ timeoutThread
@@ -127,6 +128,7 @@ listen :: MState MasterState IO ()
 listen = get >>= \s -> do
   h <- liftIO $ do
     (conn,_) <- SOCKET.accept $ receiver s
+    IO.putStrLn "[!] New connection established!"
     socketToHandle conn ReadMode 
 
   forkM_ (channelWriter h)
@@ -136,10 +138,13 @@ listen = get >>= \s -> do
 channelWriter :: Handle -> MState MasterState IO ()
 channelWriter h = get >>= \s -> do
   liftIO $ do
-    message <- KVProtocol.getMessage h
-    either (IO.putStr . show . (++ "\n")) 
-           (writeChan $ channel s)
-           message
+    isEOF <- hIsEOF h
+    if isEOF then return ()
+    else do
+      message <- KVProtocol.getMessage h
+      either (IO.putStr . show . (++ "\n")) 
+             (writeChan $ channel s)
+             message
   
   channelWriter h 
 
@@ -304,57 +309,64 @@ consistentHashing_ request = get >>= \s -> do
 sendMsgToRing :: KVMessage -> MState MasterState IO ()
 sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToSlave n msg)
 
-forwardToSlaveRetry :: KVSlave -> KVMessage -> Int -> MState MasterState IO ()
-forwardToSlaveRetry slv msg timeout = get >>= \s -> do
-  -- We can stop resending if we've received an ack from the node
-  let tx = lookupTX (txn_id msg) s
-      tx' = fromJust tx
-      forwardNeeded = not . S.member (slvID slv) $ responded $ tx'
-  if isJust tx && forwardNeeded then do
-    forwardToSlave slv msg
-    -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
-    traceShowM $ "sleep for " ++ (show timeout)
-    liftIO $ threadDelay $ timeout
-    traceShowM "recurse forwardtoslave"
-    forwardToSlaveRetry slv msg (timeout * 2)
-  else do
-    traceShowM "tx doesn't exist"
-    return ()
+--forwardToSlaveRetry :: KVSlave -> KVMessage -> Int -> MState MasterState IO ()
+--forwardToSlaveRetry slv msg timeout = get >>= \s -> do
+--  -- We can stop resending if we've received an ack from the node
+--  let tx = lookupTX (txn_id msg) s
+--      tx' = fromJust tx
+--      forwardNeeded = not . S.member (slvID slv) $ responded $ tx'
+--  if isJust tx && forwardNeeded then do
+--    forwardToSlave slv msg
+--    -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
+--    traceShowM $ "sleep for " ++ (show timeout)
+--    liftIO $ threadDelay $ timeout
+--    traceShowM "recurse forwardtoslave"
+--    forwardToSlaveRetry slv msg (timeout * 2)
+--  else do
+--    traceShowM "tx doesn't exist"
+--    return ()
 
 forwardToSlave :: KVSlave -> KVMessage -> MState MasterState IO ()
 forwardToSlave slv msg = get >>= \s -> do
-  traceShowM "forwardtoslave called"
   let h = fromJust $ Map.lookup (slvID slv) (slvHMap s)
   MonadError.catchError (liftIO $ KVProtocol.sendMessage h msg)
-                        (\(e :: IOException) -> do
+                        (\(e :: IOException) -> do 
+                          --means that connection died, we need to reconnect
+                          socket <- liftIO $ do
+                            IO.putStr (show e)
+                            delay 1000000
+                            KVProtocol.connectToHost (host slv) (port slv)
+                          sMVar <- liftIO $ newMVar socket
+                          modifyM_ $ \s -> s { slvHMap = Map.insert (slvID slv) sMVar (slvHMap s)}
+
                           modifyM_ $ \s -> do
                             let tx = lookupTX (txn_id msg) s
                                 tx' = fromJust tx
                             if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
                         )
 
-tryConnect_ :: KVSlave -> IO (Handle)
-tryConnect_ slv = Catch.catch (connectTo (host slv) (port slv))
-                              (\(e :: SomeException) -> do 
-                                delay 1000000
-                                tryConnect_ slv
-                              )
+--tryConnect_ :: KVSlave -> IO (Handle)
+--tryConnect_ slv = Catch.catch (connectTo (host slv) (port slv))
+--                              (\(e :: SomeException) -> do 
+--                                delay 1000000
+--                                tryConnect_ slv
+--                              )
 
 
-tryConnect :: KVSlave -> KVMessage -> MState MasterState IO (Maybe Handle)
-tryConnect slv msg = do
-  result <- liftIO $ Catch.try $ connectTo (host slv) (port slv)
-  case result of
-    Left (e :: SomeException) -> do
-      -- the connection time out, meaning that the transaction should be aborted.
-      -- mark this in the timeout map so the timeout thread behaves appropriately.
-      modifyM_ $ \s -> do
-        let tx = lookupTX (txn_id msg) s
-            tx' = fromJust tx
-        if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
-      return Nothing
+--tryConnect :: KVSlave -> KVMessage -> MState MasterState IO (Maybe Handle)
+--tryConnect slv msg = do
+--  result <- liftIO $ Catch.try $ connectTo (host slv) (port slv)
+--  case result of
+--    Left (e :: SomeException) -> do
+--      -- the connection time out, meaning that the transaction should be aborted.
+--      -- mark this in the timeout map so the timeout thread behaves appropriately.
+--      modifyM_ $ \s -> do
+--        let tx = lookupTX (txn_id msg) s
+--            tx' = fromJust tx
+--        if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
+--      return Nothing
 
-    Right h -> liftIO $ return (Just h)
+--    Right h -> liftIO $ return (Just h)
 
 sendMsgToClient :: KVMessage -> MState MasterState IO ()
 sendMsgToClient msg = get >>= \s -> liftIO $ do

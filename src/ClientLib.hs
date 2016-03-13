@@ -44,7 +44,7 @@ type ClientId = Int
 type MasterHandle = MVar ClientState
 
 data ClientState = ClientState {
-                    receiver :: Socket
+                    receiver :: Handle
                   , sender :: MVar Socket
                   , cfg :: Lib.Config
                   , me :: (ClientId, HostName, PortID) 
@@ -56,22 +56,18 @@ instance Show (ClientState) where
   show (ClientState skt _ cfg me _ nextTid) = show skt ++ show cfg ++ show me ++ show nextTid 
 
 
-establishListen :: Socket -> IO (Socket, SockAddr)
-establishListen skt = catch (SOCKET.accept skt) 
+establishAccept :: Socket -> IO (Socket, SockAddr)
+establishAccept skt = catch (SOCKET.accept skt) 
                             (\(e:: SomeException) -> do
                               threadDelay 1000000
-                              establishListen skt
+                              establishAccept skt
                             )
 
 listen :: MasterHandle -> IO()
 listen mvar = do
   state <- readMVar mvar
 
-  (conn, _) <- establishListen (receiver state)
-
-  h <- SOCKET.socketToHandle conn ReadMode
-  response <- KVProtocol.getMessage h
-  IO.hClose h
+  response <- KVProtocol.getMessage (receiver state)
 
   either (\errmsg -> do
           IO.putStr $ errmsg ++ "\n"
@@ -94,36 +90,35 @@ listen mvar = do
 registerWithMaster :: Lib.Config -> IO (MasterHandle)
 registerWithMaster cfg = do
   --Allocate a socket on the client for communication with the master
-  receiver <- KVProtocol.listenOnPort aNY_PORT
+  listener <- KVProtocol.listenOnPort aNY_PORT
 
   sender <- KVProtocol.connectToHost (Lib.masterHostName cfg) (Lib.masterPortId cfg)
   senderMVar <- newMVar sender
 
-  meData <- registerWithMaster_ cfg receiver senderMVar
+  (meData, receiver) <- registerWithMaster_ cfg listener senderMVar
   handleMVar <- newMVar $ ClientState receiver senderMVar cfg meData Map.empty 1
   forkIO $ listen handleMVar
   return handleMVar
 
 --Send a registration message to the master with txn_id 0 and wait to receive
 --clientId back
-registerWithMaster_ :: Lib.Config -> Socket -> MVar Socket -> IO (ClientId, HostName, PortID)
-registerWithMaster_ cfg receiver senderMVar = do
-  portId@(PortNumber pid) <- NETWORK.socketPort receiver
+registerWithMaster_ :: Lib.Config -> Socket -> MVar Socket -> IO ((ClientId, HostName, PortID), Handle)
+registerWithMaster_ cfg listener senderMVar = do
+  portId@(PortNumber pid) <- NETWORK.socketPort listener
   hostName <- BSD.getHostName
   let txn_id = 0
 
   KVProtocol.sendMessage senderMVar (KVRegistration (0, txn_id) hostName (fromEnum pid))
 
-  clientId <- waitForFirstAck -- wait for the Master to respond with the initial ack, and
+  (clientId, h) <- waitForFirstAck -- wait for the Master to respond with the initial ack, and
                               -- update the config to self identify with the clientId
-  return (clientId, hostName, portId)
+  return ((clientId, hostName, portId), h)
 
   where waitForFirstAck = do
-          (conn, _) <- establishListen receiver
+          (conn, _) <- establishAccept listener
 
           h <- SOCKET.socketToHandle conn ReadMode
           response <- KVProtocol.getMessage h
-          IO.hClose h
 
           either (\errmsg -> do
                   IO.putStr $ errmsg ++ "\n"
@@ -131,7 +126,7 @@ registerWithMaster_ cfg receiver senderMVar = do
                  )
                  (\kvMsg -> do
                     case kvMsg of
-                      (KVAck (clientId, txn_id) _ _ ) -> return clientId
+                      (KVAck (clientId, txn_id) _ _ ) -> return (clientId, h)
                       _ -> do
                         waitForFirstAck --todo, error handling
                  )
