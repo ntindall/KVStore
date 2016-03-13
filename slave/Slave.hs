@@ -8,7 +8,7 @@ import System.IO as IO
 import System.Directory as DIR
 import System.FileLock
 import Network as NETWORK
-import Network.Socket as SOCKET
+import Network.Socket as SOCKET hiding (listen)
 import Network.BSD as BSD
 import Data.Maybe
 import Data.List as List
@@ -126,7 +126,7 @@ runKVSlave = get >>= \s -> do
   forkM_ sendResponses
   forkM_ checkpoint
 
-  processMessages
+  listen
 
 checkpoint :: MState SlaveState IO ()
 checkpoint = get >>= \s -> do 
@@ -156,20 +156,26 @@ checkpoint = get >>= \s -> do
   liftIO $ threadDelay 10000000
   checkpoint
 
-processMessages :: MState SlaveState IO ()
-processMessages = get >>= \s -> do
-  liftIO $ do
-    let process = either (IO.putStr . show . (++ "\n")) (writeChan $ channel s)
-    Catch.bracket
-      (SOCKET.accept $ receiver s) 
-      (return)
-      (\(conn, _) -> do
-        h <- SOCKET.socketToHandle conn ReadMode
-        KVProtocol.getMessage h >>= process
-        hClose h
-      )
+-- Listen and write to thread-safe channel
+listen :: MState SlaveState IO ()
+listen = get >>= \s -> do
+  h <- liftIO $ do
+    (conn,_) <- SOCKET.accept $ receiver s
+    socketToHandle conn ReadMode 
+
+  forkM_ (channelWriter h)
   
-  processMessages
+  listen
+
+channelWriter :: Handle -> MState SlaveState IO ()
+channelWriter h = get >>= \s -> do
+  liftIO $ do
+    message <- KVProtocol.getMessage h
+    either (IO.putStr . show . (++ "\n")) 
+           (writeChan $ channel s)
+           message
+  
+  channelWriter h 
 
 
 

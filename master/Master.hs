@@ -125,20 +125,24 @@ initMaster = get >>= \s -> do
 -- Listen and write to thread-safe channel
 listen :: MState MasterState IO ()
 listen = get >>= \s -> do
+  h <- liftIO $ do
+    (conn,_) <- SOCKET.accept $ receiver s
+    socketToHandle conn ReadMode 
 
-  liftIO $ do
-    IO.putStrLn $ show (receiver s)
-    let process = either (IO.putStr . show . (++ "\n")) (writeChan $ channel s)
-    
-    (conn,_ ) <- (SOCKET.accept $ receiver s) 
-    isC <- isConnected conn
-    traceIO $ show isC
-    h <- SOCKET.socketToHandle conn ReadMode
-    KVProtocol.getMessage h >>= process
-    hClose h
-      
-  liftIO $ IO.putStr "recursing"
+  forkM_ (channelWriter h)
+  
   listen
+
+channelWriter :: Handle -> MState MasterState IO ()
+channelWriter h = get >>= \s -> do
+  liftIO $ do
+    message <- KVProtocol.getMessage h
+    either (IO.putStr . show . (++ "\n")) 
+           (writeChan $ channel s)
+           message
+  
+  channelWriter h 
+
 
 processMessages :: MState MasterState IO ()
 processMessages = get >>= \s -> do
