@@ -69,9 +69,7 @@ listen mvar = do
 
   (conn, _) <- establishListen (receiver state)
 
-  h <- SOCKET.socketToHandle conn ReadMode
-  response <- KVProtocol.getMessage h
-  IO.hClose h
+  response <- KVProtocol.getMessage conn
 
   either (\errmsg -> do
           IO.putStr $ errmsg ++ "\n"
@@ -120,10 +118,7 @@ registerWithMaster_ cfg receiver senderMVar = do
 
   where waitForFirstAck = do
           (conn, _) <- establishListen receiver
-
-          h <- SOCKET.socketToHandle conn ReadMode
-          response <- KVProtocol.getMessage h
-          IO.hClose h
+          response <- KVProtocol.getMessage conn
 
           either (\errmsg -> do
                   IO.putStr $ errmsg ++ "\n"

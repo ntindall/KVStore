@@ -126,11 +126,9 @@ kV_TIMEOUT_MICRO = 1000000
 decodeMsg :: B.ByteString -> Either String KVMessage
 decodeMsg = CEREAL.decodeLazy
 
-getMessage :: Handle -> IO(Either String KVMessage)
-getMessage h = do
-  isReady <- hReady h
-
-  bytes <- C8.hGetLine h
+getMessage :: Socket -> IO(Either String KVMessage)
+getMessage rcv = do
+  bytes <- accumulateMsg rcv C8.empty
   traceIO $ show bytes   
   if C8.null bytes
   then return $ Left "Handle is empty"
@@ -145,14 +143,19 @@ getMessage h = do
     Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
     return $ decodeMsg (fromStrict bytes)
 
+  where accumulateMsg sock acc = do
+          byte <- SOCKETBSTRING.recv sock 1
+          if (byte == "\n") 
+          then return acc
+          else accumulateMsg sock (acc `C8.append` byte)
+
+
 --socket must already be connected
 sendMessage :: MVar Socket -> KVMessage -> IO ()
 sendMessage h msg = do
   let assert sendSock = do
-        connected <- SOCKET.isConnected sendSock
-
-        if not connected then reconnect "127.0.0.1" (PortNumber 1063) sendSock
-                         else return ()
+        bool <- SOCKET.isWritable sendSock
+        IO.putStr $ show bool
         suc <- SOCKETBSTRING.send sendSock (toStrict ((CEREAL.encodeLazy msg) `B.append` "\n"))
         traceIO $ show suc
         if (suc > 0) then return () else do

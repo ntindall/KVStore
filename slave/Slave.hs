@@ -164,9 +164,7 @@ processMessages = get >>= \s -> do
       (SOCKET.accept $ receiver s) 
       (return)
       (\(conn, _) -> do
-        h <- SOCKET.socketToHandle conn ReadMode
-        KVProtocol.getMessage h >>= process
-        hClose h
+        KVProtocol.getMessage conn >>= process
       )
   
   processMessages
