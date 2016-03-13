@@ -33,8 +33,8 @@ import Control.Concurrent.MVar
 
 --TODO, separate PROTOCOL module from TYPES module so things are more
 --human readable
-import qualified KVProtocol (getMessage, sendMessage, connectToMaster)
-import KVProtocol hiding (getMessage, sendMessage, connectToMaster)
+import qualified KVProtocol (getMessage, sendMessage, connectToHost)
+import KVProtocol hiding (getMessage, sendMessage, connectToHost)
 import qualified Utils as Utils
 
 import Debug.Trace
@@ -44,7 +44,8 @@ type ClientId = Int
 type MasterHandle = MVar ClientState
 
 data ClientState = ClientState {
-                    skt :: Socket
+                    receiver :: Socket
+                  , sender :: MVar Socket
                   , cfg :: Lib.Config
                   , me :: (ClientId, HostName, PortID) 
                   , outstandingTxns :: Map.Map KVTxnId (MVar KVMessage)
@@ -52,21 +53,23 @@ data ClientState = ClientState {
                  }
 
 instance Show (ClientState) where
-  show (ClientState skt cfg me _ nextTid) = show skt ++ show cfg ++ show me ++ show nextTid 
+  show (ClientState skt _ cfg me _ nextTid) = show skt ++ show cfg ++ show me ++ show nextTid 
+
+
+establishListen :: Socket -> IO (Socket, SockAddr)
+establishListen skt = catch (SOCKET.accept skt) 
+                            (\(e:: SomeException) -> do
+                              threadDelay 1000000
+                              establishListen skt
+                            )
 
 listen :: MasterHandle -> IO()
 listen mvar = do
   state <- readMVar mvar
 
-  let establishListen = catch (NETWORK.accept (skt state))
-                          (\(e:: SomeException) -> do
-                            threadDelay 1000000
-                            establishListen
-                          )
-  (h, _, _) <- establishListen
+  (conn, _) <- establishListen (receiver state)
 
-  response <- KVProtocol.getMessage h
-  IO.hClose h
+  response <- KVProtocol.getMessage conn
 
   either (\errmsg -> do
           IO.putStr $ errmsg ++ "\n"
@@ -89,42 +92,42 @@ listen mvar = do
 registerWithMaster :: Lib.Config -> IO (MasterHandle)
 registerWithMaster cfg = do
   --Allocate a socket on the client for communication with the master
-  s <- Utils.getFreeSocket
-  meData <- registerWithMaster_ cfg s
-  mvar <- newMVar $ ClientState s cfg meData Map.empty 1
-  forkIO $ listen mvar
-  return mvar
+  receiver <- KVProtocol.listenOnPort aNY_PORT
+
+  sender <- KVProtocol.connectToHost (Lib.masterHostName cfg) (Lib.masterPortId cfg)
+  senderMVar <- newMVar sender
+
+  meData <- registerWithMaster_ cfg receiver senderMVar
+  handleMVar <- newMVar $ ClientState receiver senderMVar cfg meData Map.empty 1
+  forkIO $ listen handleMVar
+  return handleMVar
 
 --Send a registration message to the master with txn_id 0 and wait to receive
 --clientId back
-registerWithMaster_ :: Lib.Config -> Socket -> IO (ClientId, HostName, PortID)
-registerWithMaster_ cfg s = do
-  portId@(PortNumber pid) <- NETWORK.socketPort s
+registerWithMaster_ :: Lib.Config -> Socket -> MVar Socket -> IO (ClientId, HostName, PortID)
+registerWithMaster_ cfg receiver senderMVar = do
+  portId@(PortNumber pid) <- NETWORK.socketPort receiver
   hostName <- BSD.getHostName
-
   let txn_id = 0
-  h <- KVProtocol.connectToMaster cfg
-  KVProtocol.sendMessage h (KVRegistration (0, txn_id) hostName (fromEnum pid))
-  IO.hClose h
+
+  KVProtocol.sendMessage senderMVar (KVRegistration (0, txn_id) hostName (fromEnum pid))
 
   clientId <- waitForFirstAck -- wait for the Master to respond with the initial ack, and
                               -- update the config to self identify with the clientId
   return (clientId, hostName, portId)
 
   where waitForFirstAck = do
-          (h', _, _) <- NETWORK.accept s
-          response <- KVProtocol.getMessage h'
+          (conn, _) <- establishListen receiver
+          response <- KVProtocol.getMessage conn
 
           either (\errmsg -> do
                   IO.putStr $ errmsg ++ "\n"
-                  IO.hClose h'
                   waitForFirstAck
                  )
                  (\kvMsg -> do
                     case kvMsg of
                       (KVAck (clientId, txn_id) _ _ ) -> return clientId
                       _ -> do
-                        IO.hClose h'
                         waitForFirstAck --todo, error handling
                  )
                  response
@@ -145,15 +148,14 @@ sendRequestAndWaitForResponse mvar req = do
   putMVar mvar $ state { nextTid = tNo + 1
                        , outstandingTxns = outstandingTxns'}
 
-  h <- KVProtocol.connectToMaster config
-  KVProtocol.sendMessage h request
-  IO.hClose h
+  state' <- readMVar mvar
+  KVProtocol.sendMessage (sender state') request
 
   response <- takeMVar myMvar
 
-  state' <- takeMVar mvar
-  let outstandingTxns'' = Map.delete tid (outstandingTxns state')
-  putMVar mvar $ state' { outstandingTxns = outstandingTxns''}
+  state'' <- takeMVar mvar
+  let outstandingTxns'' = Map.delete tid (outstandingTxns state'')
+  putMVar mvar $ state'' { outstandingTxns = outstandingTxns''}
 
   return $ Just B.empty
 

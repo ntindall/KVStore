@@ -20,12 +20,15 @@ import qualified Data.Foldable as Foldable
 
 import Data.Maybe
 
+import Network.Socket as SOCKET hiding (listen)
+
 import Control.Concurrent.MState
 import Control.Monad.State
 
 import Control.Exception
 import Control.Monad.Reader
 import Control.Monad.Catch as Catch
+import qualified Control.Monad.Error as MonadError
 import Control.Concurrent
 import Control.Concurrent.Chan
 import Control.Concurrent.Thread.Delay
@@ -45,12 +48,14 @@ type SlvId = Int
 
 --https://hackage.haskell.org/package/lrucache-1.2.0.0/docs/Data-Cache-LRU.html
 data MasterState = MasterState {
-                  socket :: Socket
+                  receiver :: Socket
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
                   --the votemap contains as a key the txn id, and has as a value
                   --the set of slaves that have responded with a READY vote
                 , txs :: Map.Map KVTxnId TX
+                , clntHMap :: Map.Map Int (MVar Socket)
+                , slvHMap :: Map.Map Int (MVar Socket)
                 -- , voteMap :: Map.Map KVTxnId (Set.Set Int)
                 -- , voteMap :: KVMap Int
                 --   --the ackMap contains as a key the txn id, and has as a value
@@ -76,9 +81,10 @@ data TX = TX {
  deriving (Show)
 
 data KVSlave = KVSlave { slvID :: Int , host :: HostName,  port :: PortID }
+  deriving (Show)
 
 instance Show (MasterState) where
-  show (MasterState skt _ cfg txs) = 
+  show (MasterState skt _ cfg txs _ _) = 
     show skt ++ show cfg ++ show txs
 
 -- Entry Point
@@ -92,13 +98,26 @@ main = Lib.parseArguments >>= \args -> case args of
     DIR.createDirectory "database"
     DIR.createDirectory "database/logs"
     ---------------------------------
-    ms <- MasterState <$> listenOn (Lib.masterPortId c) <*> newChan
-    execMState initMaster $ ms c Map.empty
+    let slaves = L.mapAccumL (\i (h,p) -> (i+1, KVSlave i h p)) 0 (slaveConfig $ c)
+
+    slaves' <- mapM (\slv -> do
+                  s <- liftIO $ KVProtocol.connectToHost (host slv) (port slv)
+                  m <- liftIO $ newMVar s
+
+                  liftIO $ return (slvID slv, m)
+               ) (snd slaves)
+
+    let pid@(PortNumber pno) = Lib.masterPortId c
+    recvSock <- KVProtocol.listenOnPort pno
+    chan <- newChan
+
+    execMState initMaster (MasterState recvSock chan c Map.empty Map.empty (Map.fromList slaves'))
     return ()
 
 -- Initialization for Master Node
 initMaster :: MState MasterState IO ()
-initMaster = do
+initMaster = get >>= \s -> do
+
   forkM_ $ listen
   forkM_ $ timeoutThread
   processMessages
@@ -106,12 +125,15 @@ initMaster = do
 -- Listen and write to thread-safe channel
 listen :: MState MasterState IO ()
 listen = get >>= \s -> do
+
   liftIO $ do
+    IO.putStrLn $ show (receiver s)
     let process = either (IO.putStr . show . (++ "\n")) (writeChan $ channel s)
-    Catch.bracket
-      (accept $ socket s) 
-      (hClose . fst3)
-      ((>>= process) . KVProtocol.getMessage . fst3)
+    
+    (conn,_ ) <- (SOCKET.accept $ receiver s) 
+    KVProtocol.getMessage conn >>= process
+      
+  liftIO $ IO.putStr "recursing"
   listen
 
 processMessages :: MState MasterState IO ()
@@ -139,17 +161,9 @@ processMessage (KVVote tid sid VoteReady request) = do
 
 processMessage kvMsg@(KVResponse tid sid _) = do
   slaveResponded tid sid
-  --complete <- isComplete tid
-  --when complete $ do
-
-  --forward first response to client, delete from map
   complete <- isComplete tid
   if complete then sendMsgToClient kvMsg >>= (\_ -> clearTX tid) else (liftIO $ return ())
 
-  -- TODO: add timeout for get reqs
-  -- addAck tid sid
-  -- complete <- ackComplete tid
-  -- if complete then clearAcksTX tid else return ()
 
 processMessage kvMsg@(KVRequest tid req) = do
   now <- liftIO U.currentTimeMicro
@@ -178,22 +192,18 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
       clientId = Prelude.length newClientCfg - 1
 
   modifyM_ $ \s -> do s { cfg = newConfig }
-  clientH <- liftIO $ uncurry connectTo cfgTuple
-  liftIO $ KVProtocol.sendMessage clientH $ KVAck (clientId, snd txn_id) (Just clientId) Nothing
-  liftIO $ hClose clientH
+  s <- liftIO $ uncurry KVProtocol.connectToHost cfgTuple
+  sMVar <- liftIO $ newMVar s
+
+  modifyM_ $ \s' -> s' { clntHMap = Map.insert clientId sMVar (clntHMap s')}
+
+  liftIO $ KVProtocol.sendMessage sMVar $ KVAck (clientId, snd txn_id) (Just clientId) Nothing
 
 processMessage _ = undefined
 
 timeoutThread :: MState MasterState IO ()
 timeoutThread = get >>= \s -> do
-  --liftIO $ IO.putStrLn "[!] TIMING OUT..."
---  liftIO $ traceIO "Timing out! in timeout thread!"
-  -- TODO: timeout transactions individually
-   -- mapM_ (\(txn_id,(ts,msg)) -> do
-   --         if (now - KVProtocol.kV_TIMEOUT_MICRO >= ts)
-   --         then sendDecisionToRing (KVDecision txn_id DecisionAbort (request msg))
-   --         else liftIO $ return ()
-   --       ) Map.toList $ txs s 
+
   now <- liftIO $ U.currentTimeMicro
   mapM_ (\(tid, tx) ->
           if (now - KVProtocol.kV_TIMEOUT_MICRO >= timeout tx) 
@@ -304,17 +314,24 @@ forwardToSlaveRetry slv msg timeout = get >>= \s -> do
     return ()
 
 forwardToSlave :: KVSlave -> KVMessage -> MState MasterState IO ()
-forwardToSlave slv msg = do
+forwardToSlave slv msg = get >>= \s -> do
   traceShowM "forwardtoslave called"
-  result <- tryConnect slv msg
-  case result of
-    Just h -> do
-      liftIO $ do
-        KVProtocol.sendMessage h msg
-        hClose h
-    Nothing -> do
-      traceShowM "unable to connect"      
-      liftIO $ return ()
+  let h = fromJust $ Map.lookup (slvID slv) (slvHMap s)
+  MonadError.catchError (liftIO $ KVProtocol.sendMessage h msg)
+                        (\(e :: IOException) -> do
+                          modifyM_ $ \s -> do
+                            let tx = lookupTX (txn_id msg) s
+                                tx' = fromJust tx
+                            if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
+                        )
+
+tryConnect_ :: KVSlave -> IO (Handle)
+tryConnect_ slv = Catch.catch (connectTo (host slv) (port slv))
+                              (\(e :: SomeException) -> do 
+                                delay 1000000
+                                tryConnect_ slv
+                              )
+
 
 tryConnect :: KVSlave -> KVMessage -> MState MasterState IO (Maybe Handle)
 tryConnect slv msg = do
@@ -340,7 +357,4 @@ sendMsgToClient msg = get >>= \s -> liftIO $ do
   else do
     -- TODO, what if client disconnected? need to add timeout logic here (or just stop if
     -- exception is thrown while trying to connectTo the client.
-    let clientCfg = Lib.clientConfig (cfg s) !! clientId
-    clientH <- uncurry connectTo clientCfg
-    KVProtocol.sendMessage clientH msg
-    hClose clientH
+    KVProtocol.sendMessage (fromJust $ Map.lookup clientId (clntHMap s)) msg

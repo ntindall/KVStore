@@ -18,7 +18,8 @@ module KVProtocol
   , kV_TIMEOUT_MICRO
   , getMessage
   , sendMessage
-  , connectToMaster
+  , connectToHost
+  , listenOnPort
   ) where
 
 import Data.Serialize as CEREAL
@@ -27,6 +28,11 @@ import Data.ByteString.Char8 as C8
 import Debug.Trace
 import Control.Exception
 import Control.Concurrent
+import Control.Monad
+import Network as NETWORK
+import Network.Socket as SOCKET
+import Network.Socket.ByteString as SOCKETBSTRING
+import Network.BSD as BSD
 
 import GHC.Generics (Generic)
 
@@ -62,7 +68,7 @@ data KVRequest = GetReq {
 
 data KVResponse = KVSuccess {
                     key :: KVKey
-                  , val :: Maybe KVVal --Nothing if not found (missing) 
+                  , val :: Maybe KVVal --Nothing if not found (missing)
                   }
                 | KVFailure {
                     errorMsg :: B.ByteString
@@ -120,9 +126,10 @@ kV_TIMEOUT_MICRO = 1000000
 decodeMsg :: B.ByteString -> Either String KVMessage
 decodeMsg = CEREAL.decodeLazy
 
-getMessage :: Handle -> IO(Either String KVMessage)
-getMessage h = do
-  bytes <- C8.hGetContents h
+getMessage :: Socket -> IO(Either String KVMessage)
+getMessage rcv = do
+  bytes <- accumulateMsg rcv C8.empty
+  traceIO $ show bytes   
   if C8.null bytes
   then return $ Left "Handle is empty"
   else do
@@ -136,18 +143,77 @@ getMessage h = do
     Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
     return $ decodeMsg (fromStrict bytes)
 
-sendMessage :: Handle -> KVMessage -> IO ()
-sendMessage h msg = do
- -- let color = prettyPrint msg
-  C8.hPutStrLn h $ toStrict (CEREAL.encodeLazy msg)
-  Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow
+  where accumulateMsg sock acc = do
+          byte <- SOCKETBSTRING.recv sock 1
+          if (byte == "\n") 
+          then return acc
+          else accumulateMsg sock (acc `C8.append` byte)
 
-connectToMaster :: Lib.Config -> IO Handle
-connectToMaster cfg = catch (connectTo (Lib.masterHostName cfg) (Lib.masterPortId cfg))
-                            (\(e :: SomeException) -> do
-                              threadDelay 1000000
-                              connectToMaster cfg
-                            )
+
+--socket must already be connected
+sendMessage :: MVar Socket -> KVMessage -> IO ()
+sendMessage h msg = do
+  let assert sendSock = do
+        bool <- SOCKET.isWritable sendSock
+        IO.putStr $ show bool
+        suc <- SOCKETBSTRING.send sendSock (toStrict ((CEREAL.encodeLazy msg) `B.append` "\n"))
+        traceIO $ show suc
+        if (suc > 0) then return () else do
+          IO.putStrLn "Retrying"
+          assert sendSock
+
+  withMVar h (\s -> do
+    assert s
+    Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow)
+
+
+      
+--creates a WRITE socket for               
+connectToHost :: HostName -> PortID -> IO Socket
+connectToHost hostname pid@(PortNumber pno) = 
+  catch (do
+    hostEntry <- BSD.getHostByName hostname
+
+    sock <- SOCKET.socket AF_INET Stream defaultProtocol
+
+    SOCKET.setSocketOption sock KeepAlive 1
+    SOCKET.connect sock (SockAddrInet pno (hostAddress hostEntry))
+    return sock
+  )
+  (\(e :: SomeException) -> do
+    traceIO $ show e
+    threadDelay 1000000
+
+    connectToHost hostname pid
+  )
+
+reconnect :: HostName -> PortID -> Socket -> IO ()
+reconnect hostname portId@(PortNumber pno) skt = do
+  hostEntry <- BSD.getHostByName hostname
+  SOCKET.connect skt (SockAddrInet pno (hostAddress hostEntry))
+
+listenOnPort :: PortNumber -> IO NETWORK.Socket
+listenOnPort port = do
+  catch (do
+    proto <- BSD.getProtocolNumber "tcp"
+    bracketOnError
+      (SOCKET.socket AF_INET Stream defaultProtocol)
+      SOCKET.sClose
+      (\sock -> do
+          SOCKET.setSocketOption sock ReuseAddr 1
+          SOCKET.setSocketOption sock ReusePort 1
+          SOCKET.setSocketOption sock KeepAlive 1
+          SOCKET.bindSocket sock (SockAddrInet port iNADDR_ANY)
+          SOCKET.listen sock maxListenQueue
+          return sock
+      )
+    )
+    (\(e :: SomeException) -> do
+      traceIO $ show e
+      threadDelay 1000000
+
+      listenOnPort port
+    )
 
 prettyPrint :: KVMessage -> Radiant
 prettyPrint m = case m of
