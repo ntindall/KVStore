@@ -130,30 +130,29 @@ getMessage :: Handle -> IO(Either String KVMessage)
 getMessage h = do
   isReady <- hReady h
 
-  if (not isReady) then getMessage h
+  bytes <- C8.hGetLine h
+  traceIO $ show bytes   
+  if C8.null bytes
+  then return $ Left "Handle is empty"
   else do
+    let msg = decodeMsg (fromStrict bytes)
 
-    bytes <- C8.hGetLine h
-    traceIO $ show bytes   
-    if C8.null bytes
-    then return $ Left "Handle is empty"
-    else do
-      let msg = decodeMsg (fromStrict bytes)
-
-          color = either (\e -> brightRed)
-                         (\m -> prettyPrint m)
-                         msg
+        color = either (\e -> brightRed)
+                       (\m -> prettyPrint m)
+                       msg
 
 
-      Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
-      return $ decodeMsg (fromStrict bytes)
+    Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
+    return $ decodeMsg (fromStrict bytes)
 
 --socket must already be connected
 sendMessage :: MVar Socket -> KVMessage -> IO ()
 sendMessage h msg = do
-  let assert sendSock = do 
-        bool <- SOCKET.isWritable sendSock
-        IO.putStr $ show bool
+  let assert sendSock = do
+        connected <- SOCKET.isConnected sendSock
+
+        if not connected then reconnect "127.0.0.1" (PortNumber 1063) sendSock
+                         else return ()
         suc <- SOCKETBSTRING.send sendSock (toStrict ((CEREAL.encodeLazy msg) `B.append` "\n"))
         traceIO $ show suc
         if (suc > 0) then return () else do
@@ -184,6 +183,11 @@ connectToHost hostname pid@(PortNumber pno) =
 
     connectToHost hostname pid
   )
+
+reconnect :: HostName -> PortID -> Socket -> IO ()
+reconnect hostname portId@(PortNumber pno) skt = do
+  hostEntry <- BSD.getHostByName hostname
+  SOCKET.connect skt (SockAddrInet pno (hostAddress hostEntry))
 
 listenOnPort :: PortNumber -> IO NETWORK.Socket
 listenOnPort port = do

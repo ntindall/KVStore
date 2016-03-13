@@ -135,7 +135,6 @@ listen = get >>= \s -> do
     traceIO $ show isC
     h <- SOCKET.socketToHandle conn ReadMode
     KVProtocol.getMessage h >>= process
-    hClose h
       
   liftIO $ IO.putStr "recursing"
   listen
