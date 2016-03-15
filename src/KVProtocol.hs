@@ -26,7 +26,7 @@ import Data.Serialize as CEREAL
 import Data.ByteString.Lazy  as B
 import Data.ByteString.Char8 as C8
 import Debug.Trace
-import Control.Exception
+import Control.Exception as E
 import Control.Concurrent
 import Control.Monad
 import Network as NETWORK
@@ -121,7 +121,7 @@ instance Serialize KVVote
 
 --MICROSECONDS
 kV_TIMEOUT_MICRO :: KVTime
-kV_TIMEOUT_MICRO = 3000000
+kV_TIMEOUT_MICRO = 1000000
 
 decodeMsg :: B.ByteString -> Either String KVMessage
 decodeMsg = CEREAL.decodeLazy
@@ -144,14 +144,16 @@ getMessage h = do
 
 --socket must already be connected
 sendMessage :: MVar Socket -> KVMessage -> IO ()
-sendMessage h msg = do
+sendMessage sockMVAR msg = do
   let assert sendSock = do 
-        bool <- SOCKET.isWritable sendSock
         suc <- SOCKETBSTRING.send sendSock (toStrict ((CEREAL.encodeLazy msg) `B.append` "\n"))
-        if (suc > 0) then return () else do
-          assert sendSock
+        if (suc > 0) then return () 
+        else do 
+          NETWORK.sClose sendSock --done with this socket... it timed out!
+          throwIO $ userError "[!] Unable to send data to socket... terminating connection" --throw an exception
+          return ()
 
-  withMVar h (\s -> do
+  withMVar sockMVAR (\s -> do
     assert s
     Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow)
 
@@ -160,7 +162,7 @@ sendMessage h msg = do
 --creates a WRITE socket for               
 connectToHost :: HostName -> PortID -> IO Socket
 connectToHost hostname pid@(PortNumber pno) = 
-  catch (do
+  E.catch (do
     hostEntry <- BSD.getHostByName hostname
 
     sock <- SOCKET.socket AF_INET Stream defaultProtocol
@@ -180,7 +182,7 @@ listenOnPort :: PortNumber -> IO NETWORK.Socket
 listenOnPort port = do
   catch (do
     proto <- BSD.getProtocolNumber "tcp"
-    bracketOnError
+    E.bracketOnError
       (SOCKET.socket AF_INET Stream defaultProtocol)
       SOCKET.sClose
       (\sock -> do

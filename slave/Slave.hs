@@ -170,16 +170,19 @@ listen = get >>= \s -> do
 
 channelWriter :: Handle -> MState SlaveState IO ()
 channelWriter h = get >>= \s -> do
-  liftIO $ do
-    isEOF <- hIsEOF h
-    if isEOF then return ()
-    else do
+  isEOF <- liftIO $ hIsClosed h >>= (\b -> if b then return b else hIsEOF h)
+  if isEOF then do
+    liftIO $ do
+      IO.putStr "[!] Closing writer handle"
+      hClose h >>= (\_ -> return ())
+  else do
+    liftIO $ do
       message <- KVProtocol.getMessage h
       either (IO.putStr . show . (++ "\n")) 
              (writeChan $ channel s)
              message
   
-  channelWriter h 
+    channelWriter h 
 
 
 

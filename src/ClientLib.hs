@@ -149,7 +149,9 @@ sendRequestAndWaitForResponse mvar req = do
                        , outstandingTxns = outstandingTxns'}
 
   state' <- readMVar mvar
-  KVProtocol.sendMessage (sender state') request
+
+  catch (KVProtocol.sendMessage (sender state') request) 
+        ((\(e :: SomeException) -> IO.putStr (show e)))
 
   response <- takeMVar myMvar
 

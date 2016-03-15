@@ -25,11 +25,11 @@ main :: IO ()
 main = Lib.parseArguments >>= \(Just config) -> do
   masterH <- CL.registerWithMaster config
 
-  cLIissueRequests masterH
+--  cLIissueRequests masterH
 
-  --children <- issueNRequests masterH 2 []
+  children <- issueNRequests masterH 10 []
 
-  --mapM_ takeMVar children
+  mapM_ takeMVar children
 
 issueNRequests :: CL.MasterHandle -> Int -> [MVar ()] -> IO ([MVar ()])
 issueNRequests mH n mvars
@@ -53,7 +53,6 @@ createRequest n = let nBstring = C8.pack $ show n
 
 cLIissueRequests :: CL.MasterHandle -> IO ()
 cLIissueRequests mH = do
-
   text <- IO.getLine
   request <- parseInput (C8.pack text)
   if isNothing request
