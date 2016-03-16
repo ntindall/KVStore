@@ -72,12 +72,12 @@ data MasterState = MasterState {
 data TXState = VOTE | ACK | RESPONSE
   deriving (Show, Eq, Ord)
 
-data TX = TX {
-  txState :: TXState,
-  responded :: S.Set SlvId,
-  timeout :: KVTime,
-  message :: KVMessage
-}
+data TX = TX { txState :: TXState
+             , responded :: S.Set SlvId
+             , kvDecision :: Maybe KVDecision
+             , timeout :: KVTime
+             , message :: KVMessage
+             }
  deriving (Show)
 
 data KVSlave = KVSlave { slvID :: Int , host :: HostName,  port :: PortID }
@@ -171,7 +171,10 @@ processMessage (KVVote tid sid VoteReady request) = do
   when (commit || timeout) $ modifyM_ $ \s -> do
     let tx = lookupTX tid s
         tx' = fromJust tx
-    if (isJust tx) then updateTX tid (tx' { responded = S.empty, txState = ACK }) s else s
+    if (isJust tx) then updateTX tid (tx' { responded = S.empty
+                                          , txState = ACK
+                                          , kvDecision = if commit then Just DecisionCommit else Just DecisionAbort
+                                          }) s else s
 
   if commit then sendDecisionToRing (KVDecision tid DecisionCommit request) 
   else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
@@ -189,7 +192,7 @@ processMessage kvMsg@(KVRequest tid req) = do
         PutReq{} -> VOTE
         DelReq{} -> VOTE
   --Communicating with shard for the first time, keep track of this in the timeout map.
-  modifyM_ $ \s -> addTX tid (TX txstate S.empty now kvMsg) s
+  modifyM_ $ \s -> addTX tid (TX txstate S.empty Nothing now kvMsg) s
   sendMsgToRing kvMsg
 
 processMessage (KVAck tid (Just sid) maybeSuccess) = do  
@@ -225,8 +228,9 @@ timeoutThread = get >>= \s -> do
   mapM_ (\(tid, tx) ->
           if (now - KVProtocol.kV_TIMEOUT_MICRO >= timeout tx) 
           then do
+            let final_decision = fromMaybe DecisionAbort (kvDecision tx)
             if (txState tx == ACK)
-              then sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
+              then sendDecisionToRing (KVDecision tid final_decision (request $ message tx))
             else sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout"))) -- else is VOTE or RESPONSE
           else return ()
         ) $ Map.toList $ txs s

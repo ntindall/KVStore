@@ -272,7 +272,7 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
   --REMOVE THIS IF YOU WANT SLAVE TO NOT DIE PROBABALISTICALLY
   death <- liftIO $ mwc $ intIn (1,100)
   --don't make death too probable, leads to unrealistic problems (OS type issues)
-  if (death > 101) then liftIO $ raiseSignal sigABRT --die "--DIE!"
+  if (death > 50) then liftIO $ raiseSignal sigABRT --die "--DIE!"
   else do 
     let config = cfg s
         maybeRequest = lookupTX tid s
