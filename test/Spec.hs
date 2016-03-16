@@ -1,11 +1,13 @@
+ {-# LANGUAGE OverloadedStrings #-}
+
 module Main (main) where
 
 import Data.ByteString.Lazy as B
 import Data.ByteString.Lazy.Char8 as C8
 
-import Test.Hspec
-import Test.QuickCheck hiding (Result)
-import Test.QuickCheck.Property (Result, rejected, liftBool)
+-- import Test.Hspec
+-- import Test.QuickCheck hiding (Result)
+-- import Test.QuickCheck.Property (Result, rejected, liftBool)
 
 import System.IO as IO
 
@@ -27,47 +29,52 @@ import Control.Monad.Trans (liftIO)
 
 import Data.Maybe
 
+import Control.Concurrent.Thread.Delay
+
 data TestState = TestState {
-   masterHandles :: [ProcessHandle], 
-   clientHandles :: [ProcessHandle],
-   slaveHandles :: [ProcessHandle]
+  masterKVHandle :: MasterHandle,
+  masterHandle :: ProcessHandle,
+  slaveHandles :: [ProcessHandle]
 }
 
 main :: IO ()
 main = do
-  (s, a) <- runStateT runTests $ TestState [] [] []
+  state <- setUpTopology
+  runStateT runTests state
   return ()
 
 runTests :: StateT TestState IO ()
 runTests = do
-  setUpTopology
-  liftIO $ hspec $ do
-    getTests
+  testN 5
+  killNodes
 
-setUpTopology :: StateT TestState IO ()
-setUpTopology = get >>= \s -> do
-  m <- liftIO $ spawnCommand "stack exec -- kvstore-master --local --size=1"
-  sl <- liftIO $ spawnCommand "stack exec -- kvstore-slave --local --size=1 --id=0"
-  c <- liftIO $ spawnCommand "stack exec -- kvstore-client --local --size=1"
+setUpTopology :: IO TestState
+setUpTopology = do
+  m <- spawnCommand "stack exec kvstore-master -- -l -n 1"
+  delay 100000
+  sl <- spawnCommand "stack exec kvstore-slave -- -l -n 1 -i 0"
+  delay 100000
+  mh <- registerWithMaster testConfig
+  return $ TestState mh m [sl]
 
-  put s { masterHandles = [m], clientHandles = [c], slaveHandles = [sl] }
+testConfig :: Lib.Config
+testConfig = do
+  let hn = "127.0.0.1"
+  let pno = PortNumber 1063
+  let clientCfg = []
+  let slaveCfg = [("127.0.0.1", PortNumber 1064)]
+  Lib.Config hn pno clientCfg slaveCfg Nothing Nothing
+
+killNodes :: StateT TestState IO ()
+killNodes = get >>= \s -> liftIO $ do
+  terminateProcess $ masterHandle s
+  sequence $ Prelude.map terminateProcess $ slaveHandles s
   return ()
 
-
-getTests :: Spec
-getTests = describe "test get requests" $ do
-  describe "single get request issued" $ do
-    it "(key,val) -> val" $ do
-      --portId@(PortNumber pid) <- NETWORK.socketPort s
-      --hostName <- BSD.getHostName
-      let pno = PortNumber 1
-      let masterPortId = PortNumber 1           
-      let clientCfg = [("127.0.0.1", PortNumber 1064)]
-      let slaveCfg = [("blee", PortNumber 2)]
-      let overallCfg = Lib.Config "" pno clientCfg slaveCfg Nothing Nothing
-
-      finCfg <- registerWithMaster overallCfg
-      let expOutput = C8.pack "val"
-      actualOutput <- getVal finCfg $ C8.pack "key"
-
-      actualOutput `shouldBe` expOutput
+testN :: Int -> StateT TestState IO ()
+testN 0 = return ()
+testN n = get >>= \s -> do
+  let key = C8.pack $ "key" ++ show n
+  let val = C8.pack $ "val" ++ show n
+  liftIO $ putVal (masterKVHandle s) key val
+  testN (n-1)
