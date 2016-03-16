@@ -107,8 +107,7 @@ main = Lib.parseArguments >>= \args -> case args of
     recvSock <- KVProtocol.listenOnPort pno
     chan <- newChan
 
-    execMState initMaster (MasterState recvSock chan c Map.empty Map.empty (Map.fromList workers'))
-    return ()
+    evalMState True initMaster (MasterState recvSock chan c Map.empty Map.empty (Map.fromList workers'))
 
 -- Initialization for Master Node
 initMaster :: MState MasterState IO ()

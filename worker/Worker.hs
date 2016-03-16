@@ -80,7 +80,7 @@ main = do
       in if workerId <= (-1) || workerId >= List.length (Lib.workerConfig config)
          then Lib.printUsage --error
          else do
-          let main_ = execMState runKVWorker $ WorkerState { cfg = config 
+          let main_ = evalMState True runKVWorker $ WorkerState { cfg = config 
                                                          ,  store = Map.empty
                                                          ,  unresolvedTxns = Map.empty
                                                          ,  recoveredTxns = Map.empty 
@@ -91,7 +91,7 @@ main = do
                 traceShowM $ "... [!][!][!] DEATH OCCURED... REBOOTING [!][!][!] ..."
                 main_ >>= \_ -> return ())
           installHandler sigABRT handler Nothing
-          main_ >>= (\_ -> return ())
+          main_
 
 
 runKVWorker :: MState WorkerState IO ()
