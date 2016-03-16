@@ -19,6 +19,7 @@ import Data.ByteString.Lazy as B
 import Data.ByteString.Lazy.Char8 as C8
 import Data.Maybe
 import Data.Map.Strict as Map
+import Data.List as List
 
 import System.IO as IO
 
@@ -27,6 +28,7 @@ import Network.Socket as SOCKET hiding (listen)
 import Network.BSD as BSD
 
 import Control.Concurrent
+import Control.Concurrent.Thread.Delay (delay)
 import Control.Concurrent.MVar
 
 -------------------------------------
@@ -49,11 +51,12 @@ data ClientState = ClientState {
                   , cfg :: Lib.Config
                   , me :: (ClientId, HostName, PortID) 
                   , outstandingTxns :: Map.Map KVTxnId (MVar KVMessage)
+                  , issuedTimes :: Map.Map KVTxnId KVTime
                   , nextTid :: Int
                  }
 
 instance Show (ClientState) where
-  show (ClientState skt _ cfg me _ nextTid) = show skt ++ show cfg ++ show me ++ show nextTid 
+  show (ClientState skt _ cfg me _ issued nextTid) = show skt ++ show cfg ++ show me ++ show issued ++ show nextTid 
 
 
 establishAccept :: Socket -> IO (Socket, SockAddr)
@@ -87,6 +90,40 @@ listen mvar = do
          response
   listen mvar
 
+
+timeoutThread :: MasterHandle -> IO ()
+timeoutThread mvar = do
+  state <- takeMVar mvar
+  now <- Utils.currentTimeMicro
+
+  timedOut <- mapM  (\(tid, time) ->
+                      if (now - (KVProtocol.kV_TIMEOUT_MICRO * 4) >= time) --give master the benefit of the doubt...
+                      then return $ Just tid -- has timed out
+                      else return $ Nothing
+                    ) $ Map.toList $ (issuedTimes state)
+
+  mapM (\tid -> IO.putStr $ "[!][!] Timing out" ++ show tid) (catMaybes timedOut)
+
+  --put a dummy message into the tids mvars, causing their waiting threads to wake up
+  dummyMessage (outstandingTxns state) (catMaybes timedOut)
+  putMVar mvar $ state { issuedTimes     = deleteList (issuedTimes state) (catMaybes timedOut) }
+
+
+  delay (KVProtocol.kV_TIMEOUT_MICRO)
+
+  timeoutThread mvar
+
+  where deleteList map (x:xs) = deleteList (Map.delete x map) xs
+        deleteList map [] = map
+
+        dummyMessage map (x:xs) = do
+          let mvar = fromJust $ Map.lookup x map
+          putMVar mvar $ KVAck x Nothing (Just $ C8.pack "Transaction timed out from client")
+          dummyMessage map xs
+        dummyMessage map [] = return ()
+
+
+
 registerWithMaster :: Lib.Config -> IO (MasterHandle)
 registerWithMaster cfg = do
   --Allocate a socket on the client for communication with the master
@@ -96,9 +133,10 @@ registerWithMaster cfg = do
   senderMVar <- newMVar sender
 
   (meData, receiver) <- registerWithMaster_ cfg listener senderMVar
-  handleMVar <- newMVar $ ClientState receiver senderMVar cfg meData Map.empty 11 --transaction numbers start at 11 to avoid CEREAL bug
+  handleMVar <- newMVar $ ClientState receiver senderMVar cfg meData Map.empty Map.empty 1 --transaction numbers start at 11 to avoid CEREAL bug
                                                                                   --difficulty deserializing data when txn_id = (x,10)
   forkIO $ listen handleMVar
+  forkIO $ timeoutThread handleMVar
   return handleMVar
 
 --Send a registration message to the master with txn_id 0 and wait to receive
@@ -145,9 +183,12 @@ sendRequestAndWaitForResponse mvar req = do
       request = KVRequest tid req
 
   let outstandingTxns' = Map.insert tid myMvar (outstandingTxns state)
+      issuedTimes' = Map.insert tid (issuedUTC req) (issuedTimes state) 
 
   putMVar mvar $ state { nextTid = tNo + 1
-                       , outstandingTxns = outstandingTxns'}
+                       , outstandingTxns = outstandingTxns'
+                       , issuedTimes = issuedTimes'
+                       }
 
   state' <- readMVar mvar
 
@@ -158,7 +199,9 @@ sendRequestAndWaitForResponse mvar req = do
 
   state'' <- takeMVar mvar
   let outstandingTxns'' = Map.delete tid (outstandingTxns state'')
-  putMVar mvar $ state'' { outstandingTxns = outstandingTxns''}
+  putMVar mvar $ state'' { outstandingTxns = Map.delete tid (outstandingTxns state'')
+                         , issuedTimes = Map.delete tid (issuedTimes state'')
+                         }
 
   return $ Just B.empty
 
