@@ -52,14 +52,14 @@ data MasterState = MasterState {
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
                   --the votemap contains as a key the txn id, and has as a value
-                  --the set of slaves that have responded with a READY vote
+                  --the set of workers that have responded with a READY vote
                 , txs :: Map.Map KVTxnId TX
                 , clntHMap :: Map.Map Int (MVar Handle)
-                , slvHMap :: Map.Map Int (MVar Handle)
+                , wkrHMap :: Map.Map Int (MVar Handle)
                 -- , voteMap :: Map.Map KVTxnId (Set.Set Int)
                 -- , voteMap :: KVMap Int
                 --   --the ackMap contains as a key the txn id, and has as a value
-                --   --the set of slaves that have responded with an ACK
+                --   --the set of workers that have responded with an ACK
                 --   --
                 --   --when the last ACK is received, the master removes the txn_id
                 --   --from both Maps and sends an acknowledgement to the client.
@@ -80,7 +80,7 @@ data TX = TX { txState :: TXState
              }
  deriving (Show)
 
-data KVSlave = KVSlave { slvID :: Int , host :: HostName,  port :: PortID }
+data KVWorker = KVWorker { wkrID :: Int , host :: HostName,  port :: PortID }
   deriving (Show)
 
 instance Show (MasterState) where
@@ -98,20 +98,20 @@ main = Lib.parseArguments >>= \args -> case args of
     DIR.createDirectory "database"
     DIR.createDirectory "database/logs"
     ---------------------------------
-    let slaves = L.mapAccumL (\i (h,p) -> (i+1, KVSlave i h p)) 0 (slaveConfig $ c)
+    let workers = L.mapAccumL (\i (h,p) -> (i+1, KVWorker i h p)) 0 (workerConfig $ c)
 
-    slaves' <- mapM (\slv -> do
-                  s <- liftIO $ KVProtocol.connectToHost (host slv) (port slv)
+    workers' <- mapM (\wkr -> do
+                  s <- liftIO $ KVProtocol.connectToHost (host wkr) (port wkr)
                   m <- liftIO $ newMVar s
 
-                  liftIO $ return (slvID slv, m)
-               ) (snd slaves)
+                  liftIO $ return (wkrID wkr, m)
+               ) (snd workers)
 
     let pid@(PortNumber pno) = Lib.masterPortId c
     recvSock <- KVProtocol.listenOnPort pno
     chan <- newChan
 
-    execMState initMaster (MasterState recvSock chan c Map.empty Map.empty (Map.fromList slaves'))
+    execMState initMaster (MasterState recvSock chan c Map.empty Map.empty (Map.fromList workers'))
     return ()
 
 -- Initialization for Master Node
@@ -164,7 +164,7 @@ processMessage (KVVote _ _ VoteAbort _) = undefined
 --TODO, when receive an abort send an abort to everyone.
 
 processMessage (KVVote tid sid VoteReady request) = do
-  slaveResponded tid sid
+  workerResponded tid sid
   commit <- isComplete tid
   timeout <- timedOut tid
 
@@ -180,7 +180,7 @@ processMessage (KVVote tid sid VoteReady request) = do
   else when timeout $ sendDecisionToRing (KVDecision tid DecisionAbort request)
 
 processMessage kvMsg@(KVResponse tid sid _) = do
-  slaveResponded tid sid
+  workerResponded tid sid
   complete <- isComplete tid
   if complete then sendMsgToClient kvMsg >>= (\_ -> clearTX tid) else (liftIO $ return ())
 
@@ -196,7 +196,7 @@ processMessage kvMsg@(KVRequest tid req) = do
   sendMsgToRing kvMsg
 
 processMessage (KVAck tid (Just sid) maybeSuccess) = do  
-  slaveResponded tid sid
+  workerResponded tid sid
   complete <- isComplete tid
   when complete $ do
     clearTX tid
@@ -243,11 +243,11 @@ timeoutThread = get >>= \s -> do
   liftIO $ delay (KVProtocol.kV_TIMEOUT_MICRO)
   timeoutThread
 
-slaveResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
-slaveResponded tid slvId = modifyM_ $ \s -> do
+workerResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
+workerResponded tid wkrId = modifyM_ $ \s -> do
   let tx = lookupTX tid s
       tx' = fromJust tx
-  if isJust tx then updateTX tid (tx' { responded = S.insert slvId (responded tx') }) s else s 
+  if isJust tx then updateTX tid (tx' { responded = S.insert wkrId (responded tx') }) s else s 
 
 -- todo: change bakc to Ord a => KVMap a later
 isComplete :: KVTxnId -> MState MasterState IO Bool
@@ -292,24 +292,24 @@ sendDecisionToRing msg@(KVDecision tid decision req) = get >>= \s -> do
   -- Note: this should not already exist in map TODO?
   -- modifyM_ $ \s -> clearResponded tid s
   shard <- consistentHashing msg
---  mapM_ (\n -> forkM_ $ forwardToSlaveRetry n msg KVProtocol.kV_TIMEOUT_MICRO) shard
+--  mapM_ (\n -> forkM_ $ forwardToWorkerRetry n msg KVProtocol.kV_TIMEOUT_MICRO) shard
   let tx = lookupTX (txn_id msg) s
       tx' = fromJust tx
 
-  if isJust tx then mapM_ (\n -> if (not . S.member (slvID n) $ responded $ tx') then forkM_ $ forwardToSlave n msg else return ()) shard
+  if isJust tx then mapM_ (\n -> if (not . S.member (wkrID n) $ responded $ tx') then forkM_ $ forwardToWorker n msg else return ()) shard
   else return ()
 
-consistentHashing :: KVMessage -> MState MasterState IO [KVSlave]
+consistentHashing :: KVMessage -> MState MasterState IO [KVWorker]
 consistentHashing (KVRequest _ req)    = consistentHashing_ req
 consistentHashing (KVDecision _ _ req) = consistentHashing_ req
 
-consistentHashing_ :: KVRequest -> MState MasterState IO [KVSlave]
+consistentHashing_ :: KVRequest -> MState MasterState IO [KVWorker]
 consistentHashing_ request = get >>= \s -> do
-    let ring = (slaveConfig $ cfg s)
+    let ring = (workerConfig $ cfg s)
         current = getHash request `mod` (L.length ring)
         successor = (current + 1) `mod` (L.length ring)
-        shard = [uncurry (\h p -> KVSlave current h p) (ring !! current),
-                 uncurry (\h p -> KVSlave successor h p) (ring !! successor)]
+        shard = [uncurry (\h p -> KVWorker current h p) (ring !! current),
+                 uncurry (\h p -> KVWorker successor h p) (ring !! successor)]
     return shard
     where getHash (GetReq _ k)   = fromIntegral $ HASH.hash32 (B.toStrict k)
           getHash (PutReq _ k _) = fromIntegral $ HASH.hash32 (B.toStrict k)
@@ -317,37 +317,37 @@ consistentHashing_ request = get >>= \s -> do
 
 
 sendMsgToRing :: KVMessage -> MState MasterState IO ()
-sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToSlave n msg)
+sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToWorker n msg)
 
---forwardToSlaveRetry :: KVSlave -> KVMessage -> Int -> MState MasterState IO ()
---forwardToSlaveRetry slv msg timeout = get >>= \s -> do
+--forwardToWorkerRetry :: KVWorker -> KVMessage -> Int -> MState MasterState IO ()
+--forwardToWorkerRetry wkr msg timeout = get >>= \s -> do
 --  -- We can stop resending if we've received an ack from the node
 --  let tx = lookupTX (txn_id msg) s
 --      tx' = fromJust tx
---      forwardNeeded = not . S.member (slvID slv) $ responded $ tx'
+--      forwardNeeded = not . S.member (wkrID wkr) $ responded $ tx'
 --  if isJust tx && forwardNeeded then do
---    forwardToSlave slv msg
+--    forwardToWorker wkr msg
 --    -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
 --    traceShowM $ "sleep for " ++ (show timeout)
 --    liftIO $ threadDelay $ timeout
---    traceShowM "recurse forwardtoslave"
---    forwardToSlaveRetry slv msg (timeout * 2)
+--    traceShowM "recurse forwardtoworker"
+--    forwardToWorkerRetry wkr msg (timeout * 2)
 --  else do
 --    traceShowM "tx doesn't exist"
 --    return ()
 
-forwardToSlave :: KVSlave -> KVMessage -> MState MasterState IO ()
-forwardToSlave slv msg = get >>= \s -> do
-  let h = fromJust $ Map.lookup (slvID slv) (slvHMap s)
+forwardToWorker :: KVWorker -> KVMessage -> MState MasterState IO ()
+forwardToWorker wkr msg = get >>= \s -> do
+  let h = fromJust $ Map.lookup (wkrID wkr) (wkrHMap s)
   MonadError.catchError (liftIO $ KVProtocol.sendMessage h msg)
                         (\(e :: IOException) -> do 
                           --means that connection died, we need to reconnect
                           socket <- liftIO $ do
                             IO.putStr (show e)
                             delay 1000000
-                            KVProtocol.connectToHost (host slv) (port slv)
+                            KVProtocol.connectToHost (host wkr) (port wkr)
                           sMVar <- liftIO $ newMVar socket
-                          modifyM_ $ \s -> s { slvHMap = Map.insert (slvID slv) sMVar (slvHMap s)}
+                          modifyM_ $ \s -> s { wkrHMap = Map.insert (wkrID wkr) sMVar (wkrHMap s)}
 
                           modifyM_ $ \s -> do
                             let tx = lookupTX (txn_id msg) s
@@ -355,17 +355,17 @@ forwardToSlave slv msg = get >>= \s -> do
                             if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
                         )
 
---tryConnect_ :: KVSlave -> IO (Handle)
---tryConnect_ slv = Catch.catch (connectTo (host slv) (port slv))
+--tryConnect_ :: KVWorker -> IO (Handle)
+--tryConnect_ wkr = Catch.catch (connectTo (host wkr) (port wkr))
 --                              (\(e :: SomeException) -> do 
 --                                delay 1000000
---                                tryConnect_ slv
+--                                tryConnect_ wkr
 --                              )
 
 
---tryConnect :: KVSlave -> KVMessage -> MState MasterState IO (Maybe Handle)
---tryConnect slv msg = do
---  result <- liftIO $ Catch.try $ connectTo (host slv) (port slv)
+--tryConnect :: KVWorker -> KVMessage -> MState MasterState IO (Maybe Handle)
+--tryConnect wkr msg = do
+--  result <- liftIO $ Catch.try $ connectTo (host wkr) (port wkr)
 --  case result of
 --    Left (e :: SomeException) -> do
 --      -- the connection time out, meaning that the transaction should be aborted.

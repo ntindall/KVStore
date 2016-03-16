@@ -141,7 +141,7 @@ handleLines (x:xs) unmatchedReadyMap storeMap
 
 --todo, auto touch files if they are not there
 persistentLogName :: Int -> String                                                   --todo, hacky
-persistentLogName slaveId = "database/logs/log_kvstore_" ++ show slaveId ++ ".txt"
+persistentLogName workerId = "database/logs/log_kvstore_" ++ show workerId ++ ".txt"
 
 --updateKVStore :: FilePath -> B.ByteString -> B.ByteString -> IO ()
 --updateKVStore filePath key val = do

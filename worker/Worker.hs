@@ -40,12 +40,12 @@ import Math.Probable
 import System.Posix.Signals
 import System.FileLock
 
---- todo, touch file when slave registers
--- todo, slave registration
+--- todo, touch file when worker registers
+-- todo, worker registration
 
-type SlaveId = Int
+type WorkerId = Int
 
-data SlaveState = SlaveState {
+data WorkerState = WorkerState {
                   receiver :: SOCKET.Socket
                 , channel :: Chan KVMessage
                 , cfg :: Lib.Config
@@ -63,11 +63,11 @@ main = do
   case success of
     Nothing     -> Lib.printUsage --an error occured
     Just config ->
-      let slaveId = fromJust (Lib.slaveNumber config)
-      in if slaveId <= (-1) || slaveId >= List.length (Lib.slaveConfig config)
+      let workerId = fromJust (Lib.workerNumber config)
+      in if workerId <= (-1) || workerId >= List.length (Lib.workerConfig config)
          then Lib.printUsage --error
          else do
-          let main_ = execMState runKVSlave $ SlaveState { cfg = config 
+          let main_ = execMState runKVWorker $ WorkerState { cfg = config 
                                                          ,  store = Map.empty
                                                          ,  unresolvedTxns = Map.empty
                                                          ,  recoveredTxns = Map.empty 
@@ -81,24 +81,24 @@ main = do
           main_ >>= (\_ -> return ())
 
 
-runKVSlave :: MState SlaveState IO ()
-runKVSlave = get >>= \s -> do 
+runKVWorker :: MState WorkerState IO ()
+runKVWorker = get >>= \s -> do 
   c <- liftIO newChan
 
   liftIO $ IO.putStrLn "[!] REBUILDING... "
 
   let config = cfg s
-      slaveId = fromJust $ Lib.slaveNumber config
-      (slaveName, slavePortId@(PortNumber portNum)) = Lib.slaveConfig config !! slaveId
-  skt <- liftIO $ KVProtocol.listenOnPort portNum -- $ listenOn slavePortId
+      workerId = fromJust $ Lib.workerNumber config
+      (workerName, workerPortId@(PortNumber portNum)) = Lib.workerConfig config !! workerId
+  skt <- liftIO $ KVProtocol.listenOnPort portNum -- $ listenOn workerPortId
 
-  fileExists <- liftIO $ DIR.doesFileExist (LOG.persistentLogName slaveId)
+  fileExists <- liftIO $ DIR.doesFileExist (LOG.persistentLogName workerId)
   if fileExists
   then do
-    store <- liftIO $ liftM (Map.fromList . Utils.readKVList) $ B.readFile $ persistentFileName slaveId
-    (unackedTxns, store') <- liftIO $ LOG.rebuild (LOG.persistentLogName slaveId) store
+    store <- liftIO $ liftM (Map.fromList . Utils.readKVList) $ B.readFile $ persistentFileName workerId
+    (unackedTxns, store') <- liftIO $ LOG.rebuild (LOG.persistentLogName workerId) store
 
-    let persistentFile = (persistentFileName slaveId)
+    let persistentFile = (persistentFileName workerId)
         bakFile = persistentFile ++ ".bak"
 
     liftIO $ withFileLock persistentFile Exclusive
@@ -111,7 +111,7 @@ runKVSlave = get >>= \s -> do
 
     modifyM_ $ \s -> s { channel = c, store = store', recoveredTxns = unackedTxns }
   else do
-   -- IO.openFile (LOG.persistentLogName slaveId) IO.AppendMode
+   -- IO.openFile (LOG.persistentLogName workerId) IO.AppendMode
     modifyM_ $ \s -> s { channel = c, store = Map.empty }
     return ()
   liftIO $ IO.putStrLn "[!] DONE REBUILDING... "
@@ -128,11 +128,11 @@ runKVSlave = get >>= \s -> do
 
   listen
 
-checkpoint :: MState SlaveState IO ()
+checkpoint :: MState WorkerState IO ()
 checkpoint = get >>= \s -> do 
   liftIO $ do
     let config = cfg s
-        mySlaveId = fromJust (Lib.slaveNumber config)
+        myWorkerId = fromJust (Lib.workerNumber config)
 
     IO.putStrLn "[!][!][!] CHECKPOINT"
     --If we have fully recovered
@@ -140,16 +140,16 @@ checkpoint = get >>= \s -> do
     then do
       --lock down the log file, cannot have race between checkpoint being written
        --and log being flushed.
-      withFileLock (LOG.persistentLogName mySlaveId) Exclusive
-                   (\_ -> withFileLock (persistentFileName mySlaveId) Exclusive
+      withFileLock (LOG.persistentLogName myWorkerId) Exclusive
+                   (\_ -> withFileLock (persistentFileName myWorkerId) Exclusive
                       (\_ -> do
-                        B.writeFile (persistentFileName mySlaveId) (Utils.writeKVList $ Map.toList (store s))
-                        LOG.flush (LOG.persistentLogName mySlaveId) 
+                        B.writeFile (persistentFileName myWorkerId) (Utils.writeKVList $ Map.toList (store s))
+                        LOG.flush (LOG.persistentLogName myWorkerId) 
                       )
                    )
     else do
-      withFileLock (persistentFileName mySlaveId) Exclusive 
-                   (\_ -> B.writeFile (persistentFileName mySlaveId) 
+      withFileLock (persistentFileName myWorkerId) Exclusive 
+                   (\_ -> B.writeFile (persistentFileName myWorkerId) 
                                       (Utils.writeKVList $ Map.toList (store s))
                    )
 
@@ -157,7 +157,7 @@ checkpoint = get >>= \s -> do
   checkpoint
 
 -- Listen and write to thread-safe channel
-listen :: MState SlaveState IO ()
+listen :: MState WorkerState IO ()
 listen = get >>= \s -> do
   h <- liftIO $ do
     (conn,_) <- SOCKET.accept $ receiver s
@@ -169,7 +169,7 @@ listen = get >>= \s -> do
   
   listen
 
-channelWriter :: Handle -> MState SlaveState IO ()
+channelWriter :: Handle -> MState WorkerState IO ()
 channelWriter h = get >>= \s -> do
   isEOF <- liftIO $ hIsClosed h >>= (\b -> if b then return b else hIsEOF h)
   if isEOF then do
@@ -188,9 +188,9 @@ channelWriter h = get >>= \s -> do
 
 
 persistentFileName :: Int -> String  --todo, hacky
-persistentFileName slaveId = "database/kvstore_" ++ show slaveId ++ ".txt"
+persistentFileName workerId = "database/kvstore_" ++ show workerId ++ ".txt"
 
-sendResponses :: MState SlaveState IO ()
+sendResponses :: MState WorkerState IO ()
 sendResponses = get >>= \s -> do
   message <- liftIO $ readChan (channel s)
 
@@ -207,15 +207,15 @@ sendResponses = get >>= \s -> do
   sendResponses
 
 getMyId :: Lib.Config -> Int
-getMyId cfg = fromJust $ Lib.slaveNumber cfg
+getMyId cfg = fromJust $ Lib.workerNumber cfg
 
-handleRequest :: KVMessage -> MState SlaveState IO ()
+handleRequest :: KVMessage -> MState WorkerState IO ()
 handleRequest msg = get >>= \s -> do
   let config = cfg s
 
   let field_txn  = txn_id msg
       field_request = request msg
-      mySlaveId = getMyId config
+      myWorkerId = getMyId config
 
   case field_request of
       PutReq ts key val -> do
@@ -226,8 +226,8 @@ handleRequest msg = get >>= \s -> do
           in s' {unresolvedTxns = updatedTxnMap}
 
         liftIO $ do
-          LOG.writeReady (LOG.persistentLogName mySlaveId) msg
-          KVProtocol.sendMessage (sender s) (KVVote field_txn mySlaveId VoteReady field_request)
+          LOG.writeReady (LOG.persistentLogName myWorkerId) msg
+          KVProtocol.sendMessage (sender s) (KVVote field_txn myWorkerId VoteReady field_request)
 
       --todo, comment
       DelReq ts key -> do
@@ -236,18 +236,18 @@ handleRequest msg = get >>= \s -> do
           in s' {unresolvedTxns = updatedTxnMap}
 
         liftIO $ do
-          LOG.writeReady (LOG.persistentLogName mySlaveId) msg
-          KVProtocol.sendMessage (sender s) (KVVote field_txn mySlaveId VoteReady field_request)
+          LOG.writeReady (LOG.persistentLogName myWorkerId) msg
+          KVProtocol.sendMessage (sender s) (KVVote field_txn myWorkerId VoteReady field_request)
 
       GetReq _ key     -> liftIO $ do 
         case Map.lookup key (store s)  of
-          Nothing -> KVProtocol.sendMessage (sender s) (KVResponse field_txn mySlaveId (KVSuccess key Nothing))
-          Just val -> KVProtocol.sendMessage (sender s) (KVResponse field_txn mySlaveId (KVSuccess key (Just (fst val))))
+          Nothing -> KVProtocol.sendMessage (sender s) (KVResponse field_txn myWorkerId (KVSuccess key Nothing))
+          Just val -> KVProtocol.sendMessage (sender s) (KVResponse field_txn myWorkerId (KVSuccess key (Just (fst val))))
 
 safeUpdateStore :: KVKey 
                 -> Maybe KVVal 
                 -> KVTime 
-                -> MState SlaveState IO ()
+                -> MState WorkerState IO ()
 safeUpdateStore k v ts = modifyM_ $ \s -> do
   let oldVal = Map.lookup k (store s)
 
@@ -257,26 +257,26 @@ safeUpdateStore k v ts = modifyM_ $ \s -> do
                 else s { store = Map.delete k (store s)}
   else s
 
-clearTxn :: KVTxnId -> MState SlaveState IO ()
+clearTxn :: KVTxnId -> MState WorkerState IO ()
 clearTxn tid = modifyM_ $ \s -> s { unresolvedTxns = Map.delete tid (unresolvedTxns s)
                                   , recoveredTxns = Map.delete tid (recoveredTxns s)
                                   }
 
 --Lookup the value in both transaction maps
-lookupTX :: KVTxnId -> SlaveState -> Maybe KVMessage
+lookupTX :: KVTxnId -> WorkerState -> Maybe KVMessage
 lookupTX tid s = let inR = Map.lookup tid (unresolvedTxns s)
                  in if (isJust inR) then inR else Map.lookup tid (recoveredTxns s)
 
-handleDecision :: KVMessage -> MState SlaveState IO ()
+handleDecision :: KVMessage -> MState WorkerState IO ()
 handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
-  --REMOVE THIS IF YOU WANT SLAVE TO NOT DIE PROBABALISTICALLY
+  --REMOVE THIS IF YOU WANT WORKER TO NOT DIE PROBABALISTICALLY
   death <- liftIO $ mwc $ intIn (1,100)
   --don't make death too probable, leads to unrealistic problems (OS type issues)
   if (death > 99) then liftIO $ raiseSignal sigABRT --die "--DIE!"
   else do 
     let config = cfg s
         maybeRequest = lookupTX tid s
-        mySlaveId = getMyId config
+        myWorkerId = getMyId config
 
     if isJust maybeRequest 
     then do
@@ -289,18 +289,18 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
           (DelReq ts k)   -> safeUpdateStore k Nothing ts
           (GetReq ts _) -> undefined -- protocol error
 
-        liftIO $ LOG.writeCommit (LOG.persistentLogName mySlaveId) msg
+        liftIO $ LOG.writeCommit (LOG.persistentLogName myWorkerId) msg
       else do
-        liftIO $ LOG.writeAbort (LOG.persistentLogName mySlaveId) msg
+        liftIO $ LOG.writeAbort (LOG.persistentLogName myWorkerId) msg
 
       clearTxn tid
       let errormsg = if decision == DecisionCommit then Nothing
                      else Just $ C8.pack "Transaction aborted"
       liftIO $ do
-        KVProtocol.sendMessage (sender s) (KVAck tid (Just mySlaveId) errormsg)
+        KVProtocol.sendMessage (sender s) (KVAck tid (Just myWorkerId) errormsg)
     else --nothing to do, but need to ACK to let master know we are back alive
       liftIO $ do
-        KVProtocol.sendMessage (sender s) (KVAck tid (Just mySlaveId) (Just $ C8.pack (show decision)))
+        KVProtocol.sendMessage (sender s) (KVAck tid (Just myWorkerId) (Just $ C8.pack (show decision)))
 
 handleResponse = undefined
 handleVote = undefined

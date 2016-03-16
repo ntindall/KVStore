@@ -1,6 +1,6 @@
-# KVStore #
+# Aergia #
 
-A distributed key-value store. CS240H Final Project.
+A distributed key-value store. Implemented in Haskell. CS240H Final Project.
 
 [Vamsi Chitters](mailto:vamsikc@stanford.edu),
 [Colin Man](mailto:colinman.stanford.edu),
@@ -10,14 +10,14 @@ A distributed key-value store. CS240H Final Project.
 
 To run the master node: `stack exec kvstore-master -- [options]`
 
-To run a slave node: `stack exec kvstore-slave -- [options]`
+To run a worker node: `stack exec kvstore-worker -- [options]`
 
 To run a client node: `stack exec kvstore-client -- [options]`
 
 ```
 KVStore
   -l      --local     local mode (configuration)
-  -n Int  --size=Int  ring size  (number of slave nodes)
-  -i Int  --id=Int    slaveId    (must be >= 0 and < ring size, only meaningful
-                                  for slave nodes)
+  -n Int  --size=Int  ring size  (number of worker nodes)
+  -i Int  --id=Int    workerId    (must be >= 0 and < ring size, only meaningful
+                                  for worker nodes)
 ```

@@ -88,7 +88,7 @@ data KVMessage = KVRegistration {
                 }
                 | KVResponse {
                   txn_id   :: KVTxnId
-                , slave_id :: Int
+                , worker_id :: Int
                 , response :: KVResponse
                 }
                | KVRequest {  -- PREPARE
@@ -101,13 +101,13 @@ data KVMessage = KVRegistration {
                 , request  :: KVRequest
                 }
                | KVAck {
-                  txn_id   :: KVTxnId --final message, sent by slave
-                , ack_id   :: Maybe Int --either the slaveId (if sent FROM slave), or Nothing
+                  txn_id   :: KVTxnId --final message, sent by worker
+                , ack_id   :: Maybe Int --either the workerId (if sent FROM worker), or Nothing
                 , success  :: Maybe B.ByteString
                }
                | KVVote {
-                  txn_id   :: KVTxnId -- READY or ABORT, sent by slave
-                , slave_id :: Int
+                  txn_id   :: KVTxnId -- READY or ABORT, sent by worker
+                , worker_id :: Int
                 , vote     :: KVVote
                 , request  :: KVRequest
                }        

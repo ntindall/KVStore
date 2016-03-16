@@ -16,15 +16,15 @@ import Debug.Trace
 
 data Mode = Local
           | RingSize Int
-          | SlaveNum Int
+          | WorkerNum Int
         deriving (Show) --can add additional modes
 
 
 data Config = Config { masterHostName :: HostName
                      , masterPortId   :: PortID
                      , clientConfig   :: [(HostName, PortID)]
-                     , slaveConfig    :: [(HostName, PortID)]
-                     , slaveNumber    :: Maybe Int
+                     , workerConfig    :: [(HostName, PortID)]
+                     , workerNumber    :: Maybe Int
                      , clientNumber   :: Maybe Int
                      }
         deriving (Show)
@@ -32,7 +32,7 @@ data Config = Config { masterHostName :: HostName
 options :: [ OptDescr Mode ]
 options = [ Option ['l'] ["local"] (NoArg Local) "local mode"
           , Option ['n'] ["size"]  (ReqArg (\s -> RingSize (read s :: Int)) "Int") "ring size"
-          , Option ['i'] ["id"]    (ReqArg (\s -> SlaveNum (read s :: Int)) "Int") "slaveId"
+          , Option ['i'] ["id"]    (ReqArg (\s -> WorkerNum (read s :: Int)) "Int") "workerId"
           ]
 
 printUsage :: IO ()
@@ -45,21 +45,21 @@ parseArguments = do
   if not (null errors) || null options
   then return Nothing
   else
-      let (isLocal, n, slaveN) = parseOptions options
-          slaveCfg = allocSlaves isLocal n
+      let (isLocal, n, workerN) = parseOptions options
+          workerCfg = allocworkers isLocal n
       in case isLocal of
         True -> return $ Just Config { masterHostName = "127.0.0.1"
                                      , masterPortId   = PortNumber 1063
                                      , clientConfig   = [] --TODO ALLOW DYNAMIC REGISTRATION OF CLIENTS
-                                     , slaveConfig    = slaveCfg
-                                     , slaveNumber = slaveN
+                                     , workerConfig    = workerCfg
+                                     , workerNumber = workerN
                                      , clientNumber = Nothing -- clients must dynamically register
                                      }
         False -> return Nothing
 
 
 parseOptions :: [Mode]                        --options parsed from command line
-             -> (Bool, Int, Maybe Int)        --(isLocal, ringSize, slaveId)
+             -> (Bool, Int, Maybe Int)        --(isLocal, ringSize, workerId)
 parseOptions l = optionsAcc l (False, 1, Nothing)
   where optionsAcc l' acc
           | null l' = acc
@@ -68,11 +68,11 @@ parseOptions l = optionsAcc l (False, 1, Nothing)
             in case opt of
               Local      -> optionsAcc (tail l') (True, snd3 acc, thd3 acc)
               RingSize n -> optionsAcc (tail l') (fst3 acc, n, thd3 acc)
-              SlaveNum s -> optionsAcc (tail l') (fst3 acc, snd3 acc, Just s)
+              WorkerNum s -> optionsAcc (tail l') (fst3 acc, snd3 acc, Just s)
 
-allocSlaves :: Bool                                --is the configuration local?
+allocworkers :: Bool                                --is the configuration local?
             -> Int                                 --ring size
             -> [(HostName, PortID)]
-allocSlaves True n  = zip (replicate n "127.0.0.1") (map PortNumber [1064..])
-allocSlaves False _ = undefined --not implemented yet
+allocworkers True n  = zip (replicate n "127.0.0.1") (map PortNumber [1064..])
+allocworkers False _ = undefined --not implemented yet
 
