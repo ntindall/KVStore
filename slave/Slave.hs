@@ -272,7 +272,7 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
   --REMOVE THIS IF YOU WANT SLAVE TO NOT DIE PROBABALISTICALLY
   death <- liftIO $ mwc $ intIn (1,100)
   --don't make death too probable, leads to unrealistic problems (OS type issues)
-  if (death > 50) then liftIO $ raiseSignal sigABRT --die "--DIE!"
+  if (death > 99) then liftIO $ raiseSignal sigABRT --die "--DIE!"
   else do 
     let config = cfg s
         maybeRequest = lookupTX tid s
@@ -300,7 +300,7 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
         KVProtocol.sendMessage (sender s) (KVAck tid (Just mySlaveId) errormsg)
     else --nothing to do, but need to ACK to let master know we are back alive
       liftIO $ do
-        KVProtocol.sendMessage (sender s) (KVAck tid (Just mySlaveId) (Just "Duplicate DECISION message"))
+        KVProtocol.sendMessage (sender s) (KVAck tid (Just mySlaveId) (Just $ C8.pack (show decision)))
 
 handleResponse = undefined
 handleVote = undefined

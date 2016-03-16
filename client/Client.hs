@@ -25,11 +25,11 @@ main :: IO ()
 main = Lib.parseArguments >>= \(Just config) -> do
   masterH <- CL.registerWithMaster config
 
-  cLIissueRequests masterH
+ -- cLIissueRequests masterH
 
-  --children <- issueNRequests masterH 20 []
+  children <- issueNRequests masterH 1000 []
 
-  --mapM_ takeMVar children
+  mapM_ takeMVar children
 
 issueNRequests :: CL.MasterHandle -> Int -> [MVar ()] -> IO ([MVar ()])
 issueNRequests mH n mvars
@@ -46,6 +46,7 @@ issueNRequests mH n mvars
                         return ()
                   ) (\_ -> putMVar m ())
 
+    threadDelay 50000
     issueNRequests mH (n - 1) (mvars ++ [m])
 
 createRequest n = let nBstring = C8.pack $ show n 

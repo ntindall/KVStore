@@ -231,7 +231,9 @@ timeoutThread = get >>= \s -> do
             let final_decision = fromMaybe DecisionAbort (kvDecision tx)
             if (txState tx == ACK)
               then sendDecisionToRing (KVDecision tid final_decision (request $ message tx))
-            else sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout"))) -- else is VOTE or RESPONSE
+            else do --is VOTE or RESPONSE
+              sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
+              --sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout")))
           else return ()
         ) $ Map.toList $ txs s
   --todo, may need to put this into modifyM_ 
