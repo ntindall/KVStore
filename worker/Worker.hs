@@ -40,18 +40,31 @@ import Math.Probable
 import System.Posix.Signals
 import System.FileLock
 
---- todo, touch file when worker registers
--- todo, worker registration
-
 type WorkerId = Int
 
 data WorkerState = WorkerState {
+                  --Socket on which this node listens for incoming connections
                   receiver :: SOCKET.Socket
+                  -- Incoming messages are received in separate threads and written
+                  -- to this channel. Another thread reads from this channel and 
+                  -- forks handlers that then manipulate the WorkerState and 
+                  -- send appropriate responses to other nodes.
                 , channel :: Chan KVMessage
+                  -- Static config data instantiated at runtime
                 , cfg :: Lib.Config
+                  -- The in memory store. While the node is operational, the store
+                  -- represents the total state of the values that should be stored
+                  -- on it.
                 , store :: Map.Map KVKey (KVVal, KVTime)
+                  -- The transactions that have not yet been completed (either
+                  -- COMMITed or ABORTed). Internal state required for appropriate
+                  -- behavior of this node.
                 , unresolvedTxns :: Map.Map KVTxnId KVMessage
+                  -- The set of transcations recovered from the log. The node will
+                  -- not flush its log until all of these transactions have been
+                  -- ACKED
                 , recoveredTxns :: Map.Map KVTxnId KVMessage
+                  -- Write handle for communication with the master
                 , sender :: MVar Handle
                 }
  --  deriving (Show)
@@ -116,6 +129,8 @@ runKVWorker = get >>= \s -> do
     return ()
   liftIO $ IO.putStrLn "[!] DONE REBUILDING... "
 
+  -- TODO: dynamic worker registration, for now, instantiate based upon command
+  -- line arguments
   sndr <- liftIO $ do
     s <- KVProtocol.connectToHost (Lib.masterHostName config)
                                   (Lib.masterPortId config)
@@ -169,7 +184,9 @@ listen = get >>= \s -> do
   
   listen
 
-channelWriter :: Handle -> MState WorkerState IO ()
+channelWriter :: Handle                       --Read handle, the master is a writer
+                                              --to this handle
+              -> MState WorkerState IO ()
 channelWriter h = get >>= \s -> do
   isEOF <- liftIO $ hIsClosed h >>= (\b -> if b then return b else hIsEOF h)
   if isEOF then do
@@ -186,10 +203,13 @@ channelWriter h = get >>= \s -> do
     channelWriter h 
 
 
-
-persistentFileName :: Int -> String  --todo, hacky
+persistentFileName :: Int    --the workerId
+                   -> String --the persistentFile name associated with this worker
 persistentFileName workerId = "database/kvstore_" ++ show workerId ++ ".txt"
 
+-- | Channel reading thread. Reads most recent message from the channel (blocks until
+-- a message exists. Then forks a handler that manipulates the WorkerState appropriately.
+-- The WorkerState is threaded through each thread through the use of forkM_
 sendResponses :: MState WorkerState IO ()
 sendResponses = get >>= \s -> do
   message <- liftIO $ readChan (channel s)

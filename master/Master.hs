@@ -44,29 +44,25 @@ import qualified Utils as U
 
 type SlvId = Int
 
--- type KVMap a = Map.Map KVTxnId (Set.Set a)
-
+--TODO
 --https://hackage.haskell.org/package/lrucache-1.2.0.0/docs/Data-Cache-LRU.html
 data MasterState = MasterState {
+                  -- Socket on which this node listens for incoming connections
                   receiver :: Socket
+                  -- Incoming messages are received in separate threads and written
+                  -- to this channel. Another thread reads from this channel and 
+                  -- forks handlers that then manipulate the MasterState and 
+                  -- send appropriate responses to other nodes.
                 , channel :: Chan KVMessage
+                  -- Static config data instantiated at runtime
                 , cfg :: Lib.Config
-                  --the votemap contains as a key the txn id, and has as a value
-                  --the set of workers that have responded with a READY vote
+                  -- Map representing the current state of the transcations that
+                  -- the master is handling.
                 , txs :: Map.Map KVTxnId TX
+                  -- Map representing the write handles from the master to each client
                 , clntHMap :: Map.Map Int (MVar Handle)
+                  -- Map representing the write handles from the master to each worker
                 , wkrHMap :: Map.Map Int (MVar Handle)
-                -- , voteMap :: Map.Map KVTxnId (Set.Set Int)
-                -- , voteMap :: KVMap Int
-                --   --the ackMap contains as a key the txn id, and has as a value
-                --   --the set of workers that have responded with an ACK
-                --   --
-                --   --when the last ACK is received, the master removes the txn_id
-                --   --from both Maps and sends an acknowledgement to the client.
-                -- , ackMap  :: KVMap Int
-                --   --timeout map. Map from transaction id to when the server first
-                --   --sent a KVRequest to a shard
-                -- , timeoutMap :: Map.Map KVTxnId (Int, KVMessage)
                 }
                    
 data TXState = VOTE | ACK | RESPONSE
@@ -136,7 +132,9 @@ listen = get >>= \s -> do
   
   listen
 
-channelWriter :: Handle -> MState MasterState IO ()
+channelWriter :: Handle                   --Read handle. Either a client or a 
+                                          --worker may be a writer to the handle
+              -> MState MasterState IO ()
 channelWriter h = get >>= \s -> do
   isEOF <- liftIO $ hIsClosed h >>= (\b -> if b then return b else hIsEOF h)
   if isEOF then do
@@ -152,16 +150,24 @@ channelWriter h = get >>= \s -> do
   
     channelWriter h 
 
-
+-- | Channel reading thread. Reads most recent message from the channel (blocks until
+-- a message exists. Then forks a handler that manipulates the MasterState appropriately.
+-- The MasterState is threaded through each thread through the use of forkM_
 processMessages :: MState MasterState IO ()
 processMessages = get >>= \s -> do
   message <- liftIO $ readChan $ channel s
   forkM_ $ processMessage message
   processMessages
 
-processMessage :: KVMessage -> MState MasterState IO ()
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- | Message handling function. Pattern matches on the type of message received
+-- and manipulates the MasterState appropriately.
+processMessage :: KVMessage                      --the message 
+               -> MState MasterState IO ()
 processMessage (KVVote _ _ VoteAbort _) = undefined
---TODO, when receive an abort send an abort to everyone.
+--TODO: When receive an abort send an abort to everyone.
+--      this is a protocol error
 
 processMessage (KVVote tid sid VoteReady request) = do
   workerResponded tid sid
@@ -221,6 +227,12 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
 
 processMessage _ = undefined
 
+
+-- | Reads the current state of transactions that are currently being handled by
+-- the master and aborts any of those that have exceeded the timeout threshold. 
+-- Since elements are not removed from the map until the final ACK from a worker
+-- node is received, this will continually send Decision messages to all nodes
+-- that have not responded to the decision.
 timeoutThread :: MState MasterState IO ()
 timeoutThread = get >>= \s -> do
 
@@ -228,20 +240,78 @@ timeoutThread = get >>= \s -> do
   mapM_ (\(tid, tx) ->
           if (now - KVProtocol.kV_TIMEOUT_MICRO >= timeout tx) 
           then do
+            --Lookup the decision, if we decided to commit, it is possible that other
+            --nodes have also commited. In that case, we need to tell nodes that may
+            --have died to commit as well, in order to keep the store consistent. 
             let final_decision = fromMaybe DecisionAbort (kvDecision tx)
             if (txState tx == ACK)
               then sendDecisionToRing (KVDecision tid final_decision (request $ message tx))
             else do --is VOTE or RESPONSE
               sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
-              --sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout")))
+              --TODO: could eagerly inform client that the request has timed out
+              --i.e sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout")))
+              --For now, wait for worker nodes to ACK aborts prior to responding.
           else return ()
         ) $ Map.toList $ txs s
-  --todo, may need to put this into modifyM_ 
-
-  -- mapM clearTX (L.map fst timedOutTxns)
 
   liftIO $ delay (KVProtocol.kV_TIMEOUT_MICRO)
   timeoutThread
+
+-- | Blindly forwards a message to the entire shard that should service the KVMessage
+sendMsgToRing :: KVMessage -> MState MasterState IO ()
+sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToWorker n msg)
+
+-- | Forwards a KVDecisin message to all nodes that have not yet ACKed the decision
+sendDecisionToRing :: KVMessage -> MState MasterState IO ()
+sendDecisionToRing msg@(KVDecision tid decision req) = get >>= \s -> do
+  shard <- consistentHashing msg
+  let tx = lookupTX (txn_id msg) s
+      tx' = fromJust tx
+
+  if isJust tx then mapM_ (\n -> if (not . S.member (wkrID n) $ responded $ tx') then forkM_ $ forwardToWorker n msg else return ()) shard
+  else return ()
+
+-- | Forwards a message to a worker represented by the KVWorker struct. If the
+-- message fails to send, it is assumed that the connection died and a new one
+-- is instantiated (and the state updated appropriately). 
+forwardToWorker :: KVWorker 
+                -> KVMessage 
+                -> MState MasterState IO ()
+forwardToWorker wkr msg = get >>= \s -> do
+  let h = fromJust $ Map.lookup (wkrID wkr) (wkrHMap s)
+  MonadError.catchError (liftIO $ KVProtocol.sendMessage h msg)
+                        (\(e :: IOException) -> do 
+                          --means that connection died, we need to reconnect
+                          socket <- liftIO $ do
+                            IO.putStr (show e)
+                            delay 1000000
+                            KVProtocol.connectToHost (host wkr) (port wkr)
+                          sMVar <- liftIO $ newMVar socket
+                          modifyM_ $ \s -> s { wkrHMap = Map.insert (wkrID wkr) sMVar (wkrHMap s)}
+
+                          modifyM_ $ \s -> do
+                            let tx = lookupTX (txn_id msg) s
+                                tx' = fromJust tx
+                            if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
+                        )
+
+-- | Forwards a message to the client node. Extracts the client ID by examining
+-- the first value of the KVTxnId type, which is the clientId, then looks up
+-- which handle to send to in the client handle map.
+sendMsgToClient :: KVMessage 
+                -> MState MasterState IO ()
+sendMsgToClient msg = get >>= \s -> liftIO $ do
+  let clientId = fst (txn_id msg)
+      clientCfgList = Lib.clientConfig $ cfg s
+
+  if (clientId > Prelude.length clientCfgList - 1) then return ()
+  else do
+    -- TODO, what if client disconnected? need to add timeout logic here (or just stop if
+    -- exception is thrown while trying to connectTo the client.
+    KVProtocol.sendMessage (fromJust $ Map.lookup clientId (clntHMap s)) msg
+
+--------------------------------------------------------------------------------
+-------------------------------HELPER FUNCTIONS---------------------------------
 
 workerResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
 workerResponded tid wkrId = modifyM_ $ \s -> do
@@ -287,23 +357,22 @@ clearResponded tid s = do
       tx' = fromJust tx
   if isJust tx then updateTX tid (tx' { responded = S.empty }) s else s
 
-sendDecisionToRing :: KVMessage -> MState MasterState IO ()
-sendDecisionToRing msg@(KVDecision tid decision req) = get >>= \s -> do
-  -- Note: this should not already exist in map TODO?
-  -- modifyM_ $ \s -> clearResponded tid s
-  shard <- consistentHashing msg
---  mapM_ (\n -> forkM_ $ forwardToWorkerRetry n msg KVProtocol.kV_TIMEOUT_MICRO) shard
-  let tx = lookupTX (txn_id msg) s
-      tx' = fromJust tx
+-- | Polymorphic wrapper for the _consistentHashing function
+consistentHashing :: KVMessage 
+                  -> MState MasterState IO [KVWorker]
+consistentHashing (KVRequest _ (GetReq _ k))      = consistentHashing_ k
+consistentHashing (KVRequest _ (PutReq _ k _))    = consistentHashing_ k
+consistentHashing (KVDecision _ _ (GetReq _ k))   = consistentHashing_ k
+consistentHashing (KVDecision _ _ (PutReq _ k _)) = consistentHashing_ k
 
-  if isJust tx then mapM_ (\n -> if (not . S.member (wkrID n) $ responded $ tx') then forkM_ $ forwardToWorker n msg else return ()) shard
-  else return ()
 
-consistentHashing :: KVMessage -> MState MasterState IO [KVWorker]
-consistentHashing (KVRequest _ req)    = consistentHashing_ req
-consistentHashing (KVDecision _ _ req) = consistentHashing_ req
-
-consistentHashing_ :: KVRequest -> MState MasterState IO [KVWorker]
+-- | Simple implementation of consistent hashing. Uses Farmhash to hash the
+-- KVRequest associated with the KVMessage. Takes the mod of the hash by the
+-- size of the ring to determine the first node that the data should be 
+-- wrtten to (or searched at). The second node is just the current node + 1 (mod
+-- the size of the ring
+consistentHashing_ :: KVKey 
+                   -> MState MasterState IO [KVWorker]
 consistentHashing_ request = get >>= \s -> do
     let ring = (workerConfig $ cfg s)
         current = getHash request `mod` (L.length ring)
@@ -311,80 +380,4 @@ consistentHashing_ request = get >>= \s -> do
         shard = [uncurry (\h p -> KVWorker current h p) (ring !! current),
                  uncurry (\h p -> KVWorker successor h p) (ring !! successor)]
     return shard
-    where getHash (GetReq _ k)   = fromIntegral $ HASH.hash32 (B.toStrict k)
-          getHash (PutReq _ k _) = fromIntegral $ HASH.hash32 (B.toStrict k)
-          getHash (DelReq _ k)   = fromIntegral $ HASH.hash32 (B.toStrict k) 
-
-
-sendMsgToRing :: KVMessage -> MState MasterState IO ()
-sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToWorker n msg)
-
---forwardToWorkerRetry :: KVWorker -> KVMessage -> Int -> MState MasterState IO ()
---forwardToWorkerRetry wkr msg timeout = get >>= \s -> do
---  -- We can stop resending if we've received an ack from the node
---  let tx = lookupTX (txn_id msg) s
---      tx' = fromJust tx
---      forwardNeeded = not . S.member (wkrID wkr) $ responded $ tx'
---  if isJust tx && forwardNeeded then do
---    forwardToWorker wkr msg
---    -- TODO: adjust delay (works with values as low as 10 as far as I can tell 2/3/2016 -NJT)
---    traceShowM $ "sleep for " ++ (show timeout)
---    liftIO $ threadDelay $ timeout
---    traceShowM "recurse forwardtoworker"
---    forwardToWorkerRetry wkr msg (timeout * 2)
---  else do
---    traceShowM "tx doesn't exist"
---    return ()
-
-forwardToWorker :: KVWorker -> KVMessage -> MState MasterState IO ()
-forwardToWorker wkr msg = get >>= \s -> do
-  let h = fromJust $ Map.lookup (wkrID wkr) (wkrHMap s)
-  MonadError.catchError (liftIO $ KVProtocol.sendMessage h msg)
-                        (\(e :: IOException) -> do 
-                          --means that connection died, we need to reconnect
-                          socket <- liftIO $ do
-                            IO.putStr (show e)
-                            delay 1000000
-                            KVProtocol.connectToHost (host wkr) (port wkr)
-                          sMVar <- liftIO $ newMVar socket
-                          modifyM_ $ \s -> s { wkrHMap = Map.insert (wkrID wkr) sMVar (wkrHMap s)}
-
-                          modifyM_ $ \s -> do
-                            let tx = lookupTX (txn_id msg) s
-                                tx' = fromJust tx
-                            if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
-                        )
-
---tryConnect_ :: KVWorker -> IO (Handle)
---tryConnect_ wkr = Catch.catch (connectTo (host wkr) (port wkr))
---                              (\(e :: SomeException) -> do 
---                                delay 1000000
---                                tryConnect_ wkr
---                              )
-
-
---tryConnect :: KVWorker -> KVMessage -> MState MasterState IO (Maybe Handle)
---tryConnect wkr msg = do
---  result <- liftIO $ Catch.try $ connectTo (host wkr) (port wkr)
---  case result of
---    Left (e :: SomeException) -> do
---      -- the connection time out, meaning that the transaction should be aborted.
---      -- mark this in the timeout map so the timeout thread behaves appropriately.
---      modifyM_ $ \s -> do
---        let tx = lookupTX (txn_id msg) s
---            tx' = fromJust tx
---        if isJust tx then updateTX (txn_id msg) (tx' { timeout = 0 } ) s else s
---      return Nothing
-
---    Right h -> liftIO $ return (Just h)
-
-sendMsgToClient :: KVMessage -> MState MasterState IO ()
-sendMsgToClient msg = get >>= \s -> liftIO $ do
-  let clientId = fst (txn_id msg)
-      clientCfgList = Lib.clientConfig $ cfg s
-
-  if (clientId > Prelude.length clientCfgList - 1) then return ()
-  else do
-    -- TODO, what if client disconnected? need to add timeout logic here (or just stop if
-    -- exception is thrown while trying to connectTo the client.
-    KVProtocol.sendMessage (fromJust $ Map.lookup clientId (clntHMap s)) msg
+    where getHash k = fromIntegral $ HASH.hash32 (B.toStrict k)
