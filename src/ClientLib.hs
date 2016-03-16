@@ -45,7 +45,7 @@ type MasterHandle = MVar ClientState
 
 data ClientState = ClientState {
                     receiver :: Handle
-                  , sender :: MVar Socket
+                  , sender :: MVar Handle
                   , cfg :: Lib.Config
                   , me :: (ClientId, HostName, PortID) 
                   , outstandingTxns :: Map.Map KVTxnId (MVar KVMessage)
@@ -96,13 +96,14 @@ registerWithMaster cfg = do
   senderMVar <- newMVar sender
 
   (meData, receiver) <- registerWithMaster_ cfg listener senderMVar
-  handleMVar <- newMVar $ ClientState receiver senderMVar cfg meData Map.empty 1
+  handleMVar <- newMVar $ ClientState receiver senderMVar cfg meData Map.empty 11 --transaction numbers start at 11 to avoid CEREAL bug
+                                                                                  --difficulty deserializing data when txn_id = (x,10)
   forkIO $ listen handleMVar
   return handleMVar
 
 --Send a registration message to the master with txn_id 0 and wait to receive
 --clientId back
-registerWithMaster_ :: Lib.Config -> Socket -> MVar Socket -> IO ((ClientId, HostName, PortID), Handle)
+registerWithMaster_ :: Lib.Config -> Socket -> MVar Handle -> IO ((ClientId, HostName, PortID), Handle)
 registerWithMaster_ cfg listener senderMVar = do
   portId@(PortNumber pid) <- NETWORK.socketPort listener
   hostName <- BSD.getHostName

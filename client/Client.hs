@@ -27,7 +27,7 @@ main = Lib.parseArguments >>= \(Just config) -> do
 
 --  cLIissueRequests masterH
 
-  children <- issueNRequests masterH 10 []
+  children <- issueNRequests masterH 20 []
 
   mapM_ takeMVar children
 
@@ -35,7 +35,7 @@ issueNRequests :: CL.MasterHandle -> Int -> [MVar ()] -> IO ([MVar ()])
 issueNRequests mH n mvars
   | n == 0 = return mvars
   | otherwise = do
-    let request = createRequest n
+    let request = createRequest (n*3)
     m <- newEmptyMVar 
     tid <- forkFinally (case request of
                       (Left k) -> do

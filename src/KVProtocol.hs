@@ -143,24 +143,14 @@ getMessage h = do
     return $ decodeMsg (fromStrict bytes)
 
 --socket must already be connected
-sendMessage :: MVar Socket -> KVMessage -> IO ()
-sendMessage sockMVAR msg = do
-  let assert sendSock = do 
-        suc <- SOCKETBSTRING.send sendSock (toStrict ((CEREAL.encodeLazy msg) `B.append` "\n"))
-        if (suc > 0) then return () 
-        else do 
-          NETWORK.sClose sendSock --done with this socket... it timed out!
-          throwIO $ userError "[!] Unable to send data to socket... terminating connection" --throw an exception
-          return ()
-
-  withMVar sockMVAR (\s -> do
-    assert s
+sendMessage :: MVar Handle -> KVMessage -> IO ()
+sendMessage hMvar msg = do
+  withMVar hMvar (\h -> do
+    C8.hPutStrLn h $ CEREAL.encode msg
     Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow)
 
-
-      
 --creates a WRITE socket for               
-connectToHost :: HostName -> PortID -> IO Socket
+connectToHost :: HostName -> PortID -> IO Handle
 connectToHost hostname pid@(PortNumber pno) = 
   E.catch (do
     hostEntry <- BSD.getHostByName hostname
@@ -169,7 +159,9 @@ connectToHost hostname pid@(PortNumber pno) =
 
     SOCKET.setSocketOption sock KeepAlive 1
     SOCKET.connect sock (SockAddrInet pno (hostAddress hostEntry))
-    return sock
+
+    --convert to handle
+    socketToHandle sock ReadWriteMode
   )
   (\(e :: SomeException) -> do
     traceIO $ show e

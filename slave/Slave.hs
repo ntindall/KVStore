@@ -52,7 +52,7 @@ data SlaveState = SlaveState {
                 , store :: Map.Map KVKey (KVVal, KVTime)
                 , unresolvedTxns :: Map.Map KVTxnId KVMessage
                 , recoveredTxns :: Map.Map KVTxnId KVMessage
-                , sender :: MVar Socket
+                , sender :: MVar Handle
                 }
  --  deriving (Show)
 
@@ -164,6 +164,7 @@ listen = get >>= \s -> do
     IO.putStrLn "[!] New connection established!"
     socketToHandle conn ReadMode 
 
+  liftIO $ hSetBuffering h LineBuffering
   forkM_ (channelWriter h)
   
   listen

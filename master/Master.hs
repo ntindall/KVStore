@@ -54,8 +54,8 @@ data MasterState = MasterState {
                   --the votemap contains as a key the txn id, and has as a value
                   --the set of slaves that have responded with a READY vote
                 , txs :: Map.Map KVTxnId TX
-                , clntHMap :: Map.Map Int (MVar Socket)
-                , slvHMap :: Map.Map Int (MVar Socket)
+                , clntHMap :: Map.Map Int (MVar Handle)
+                , slvHMap :: Map.Map Int (MVar Handle)
                 -- , voteMap :: Map.Map KVTxnId (Set.Set Int)
                 -- , voteMap :: KVMap Int
                 --   --the ackMap contains as a key the txn id, and has as a value
@@ -131,6 +131,7 @@ listen = get >>= \s -> do
     IO.putStrLn "[!] New connection established!"
     socketToHandle conn ReadMode 
 
+  liftIO $ hSetBuffering h LineBuffering
   forkM_ (channelWriter h)
   
   listen
