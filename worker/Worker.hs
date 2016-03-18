@@ -69,6 +69,7 @@ data WorkerState = WorkerState {
                 }
  --  deriving (Show)
 
+-- | Entry Point
 main :: IO ()
 main = do
   success <- Lib.parseArguments
@@ -93,7 +94,8 @@ main = do
           installHandler sigABRT handler Nothing
           main_
 
-
+-- | Run the worker, first interfacing with the Log module to rebuild the store
+-- (and WorkerState) to the appropriate post-recovery state.
 runKVWorker :: MState WorkerState IO ()
 runKVWorker = get >>= \s -> do 
   c <- liftIO newChan
@@ -143,6 +145,7 @@ runKVWorker = get >>= \s -> do
 
   listen
 
+-- | Periodically write the store to disk.
 checkpoint :: MState WorkerState IO ()
 checkpoint = get >>= \s -> do 
   liftIO $ do
@@ -171,7 +174,7 @@ checkpoint = get >>= \s -> do
   liftIO $ threadDelay 10000000
   checkpoint
 
--- Listen and write to thread-safe channel
+-- | Listen for new connections and fork a channel writer on each new one.
 listen :: MState WorkerState IO ()
 listen = get >>= \s -> do
   h <- liftIO $ do
@@ -184,6 +187,7 @@ listen = get >>= \s -> do
   
   listen
 
+-- | Listen to connection and write to thread-safe channel
 channelWriter :: Handle                       --Read handle, the master is a writer
                                               --to this handle
               -> MState WorkerState IO ()
@@ -249,7 +253,6 @@ handleRequest msg = get >>= \s -> do
           LOG.writeReady (LOG.persistentLogName myWorkerId) msg
           KVProtocol.sendMessage (sender s) (KVVote field_txn myWorkerId VoteReady field_request)
 
-      --todo, comment
       DelReq ts key -> do
         modifyM_ $ \s' ->
           let updatedTxnMap = Map.insert field_txn msg (unresolvedTxns s')
@@ -264,6 +267,8 @@ handleRequest msg = get >>= \s -> do
           Nothing -> KVProtocol.sendMessage (sender s) (KVResponse field_txn myWorkerId (KVSuccess key Nothing))
           Just val -> KVProtocol.sendMessage (sender s) (KVResponse field_txn myWorkerId (KVSuccess key (Just (fst val))))
 
+-- | Only update the store if the new value timestamp is greater than the time
+-- at which the request for the old value was written. 
 safeUpdateStore :: KVKey 
                 -> Maybe KVVal 
                 -> KVTime 
@@ -277,16 +282,20 @@ safeUpdateStore k v ts = modifyM_ $ \s -> do
                 else s { store = Map.delete k (store s)}
   else s
 
+-- | Remove all evidence of this transaction from the state
 clearTxn :: KVTxnId -> MState WorkerState IO ()
 clearTxn tid = modifyM_ $ \s -> s { unresolvedTxns = Map.delete tid (unresolvedTxns s)
                                   , recoveredTxns = Map.delete tid (recoveredTxns s)
                                   }
 
---Lookup the value in both transaction maps
+-- | Lookup the value in both transaction maps
 lookupTX :: KVTxnId -> WorkerState -> Maybe KVMessage
 lookupTX tid s = let inR = Map.lookup tid (unresolvedTxns s)
                  in if (isJust inR) then inR else Map.lookup tid (recoveredTxns s)
 
+-- | If the decision is a COMMIT, write to the store. In either case, write to
+-- the log the action that was taken. Send back ACK to Master once these two
+-- actions have been performed. 
 handleDecision :: KVMessage -> MState WorkerState IO ()
 handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
   --REMOVE THIS IF YOU WANT WORKER TO NOT DIE PROBABALISTICALLY
@@ -304,7 +313,7 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
 
       if decision == DecisionCommit 
       then do
-        case request field_request of -- TODO, do we even need the decision to ahve the request anymore?
+        case request field_request of 
           (PutReq ts k v) -> safeUpdateStore k (Just v) ts
           (DelReq ts k)   -> safeUpdateStore k Nothing ts
           (GetReq ts _) -> undefined -- protocol error

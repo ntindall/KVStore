@@ -1,4 +1,4 @@
-
+ 
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
@@ -91,7 +91,7 @@ instance Show (MasterState) where
   show (MasterState skt _ cfg txs _ _) = 
     show skt ++ show cfg ++ show txs
 
--- Entry Point
+-- | Entry Point
 main :: IO ()
 main = Lib.parseArguments >>= \args -> case args of
   Nothing -> Lib.printUsage -- an error occured 
@@ -117,7 +117,7 @@ main = Lib.parseArguments >>= \args -> case args of
 
     evalMState True initMaster (MasterState recvSock chan c Map.empty Map.empty (Map.fromList workers'))
 
--- Initialization for Master Node
+-- | Initialization for Master Node
 initMaster :: MState MasterState IO ()
 initMaster = get >>= \s -> do
   liftIO $ IO.putStrLn "[!] Initializing Master"
@@ -126,7 +126,7 @@ initMaster = get >>= \s -> do
   forkM_ $ timeoutThread
   processMessages
 
--- Listen and write to thread-safe channel
+-- | Listen then fork a channel writer
 listen :: MState MasterState IO ()
 listen = get >>= \s -> do
   h <- liftIO $ do
@@ -139,6 +139,7 @@ listen = get >>= \s -> do
   
   listen
 
+-- | Listen and write to thread-safe channel
 channelWriter :: Handle                   --Read handle. Either a client or a 
                                           --worker may be a writer to the handle
               -> MState MasterState IO ()
@@ -232,6 +233,7 @@ processMessage kvMsg@(KVRegistration txn_id hostName portId) = do
 
   liftIO $ KVProtocol.sendMessage sMVar $ KVAck (clientId, snd txn_id) (Just clientId) Nothing
 
+-- | TODO... better error handling if protocol is broken
 processMessage _ = undefined
 
 
@@ -247,17 +249,19 @@ timeoutThread = get >>= \s -> do
   mapM_ (\(tid, tx) ->
           if (now - KVProtocol.kV_TIMEOUT_MICRO >= timeout tx) 
           then do
-            --Lookup the decision, if we decided to commit, it is possible that other
-            --nodes have also commited. In that case, we need to tell nodes that may
-            --have died to commit as well, in order to keep the store consistent. 
+            -- Lookup the decision, if we decided to commit, it is possible that other
+            -- nodes have also commited. In that case, we need to tell nodes that may
+            -- have died to commit as well, in order to keep the store consistent. 
             let final_decision = fromMaybe DecisionAbort (kvDecision tx)
             if (txState tx == ACK)
               then sendDecisionToRing (KVDecision tid final_decision (request $ message tx))
             else do --is VOTE or RESPONSE
               sendDecisionToRing (KVDecision tid DecisionAbort (request $ message tx))
-              --TODO: could eagerly inform client that the request has timed out
-              --i.e sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout")))
-              --For now, wait for worker nodes to ACK aborts prior to responding.
+              -- TODO: could eagerly inform client that the request has timed out
+              -- i.e sendMsgToClient (KVResponse tid (-1) (KVFailure (C8.pack "Timeout")))
+              -- For now, wait for worker nodes to ACK aborts prior to responding.
+              -- TODO: exponential backoff, store in transaction how long to wait on the next
+              -- iteration. 
           else return ()
         ) $ Map.toList $ txs s
 
@@ -268,7 +272,7 @@ timeoutThread = get >>= \s -> do
 sendMsgToRing :: KVMessage -> MState MasterState IO ()
 sendMsgToRing msg = consistentHashing msg >>= mapM_ (\n -> forkM_ $ forwardToWorker n msg)
 
--- | Forwards a KVDecisin message to all nodes that have not yet ACKed the decision
+-- | Forwards a KVDecision message to all nodes that have not yet ACKed the decision
 sendDecisionToRing :: KVMessage -> MState MasterState IO ()
 sendDecisionToRing msg@(KVDecision tid decision req) = get >>= \s -> do
   shard <- consistentHashing msg
@@ -326,7 +330,6 @@ workerResponded tid wkrId = modifyM_ $ \s -> do
       tx' = fromJust tx
   if isJust tx then updateTX tid (tx' { responded = S.insert wkrId (responded tx') }) s else s 
 
--- todo: change bakc to Ord a => KVMap a later
 isComplete :: KVTxnId -> MState MasterState IO Bool
 isComplete tid = get >>= \s -> do
   let tx = lookupTX tid s
@@ -354,7 +357,7 @@ addTX tid tx s = s { txs = Map.insert tid tx (txs s) }
 lookupTX :: KVTxnId -> MasterState -> Maybe TX
 lookupTX tid s = Map.lookup tid $ txs s
 
--- updateTX, mutates the state, must be called within a mutateM_ block
+-- | updateTX, mutates the state, must be called within a mutateM_ block
 updateTX :: KVTxnId -> TX -> MasterState -> MasterState
 updateTX tid tx s = s { txs = Map.insert tid tx (txs s) }
 

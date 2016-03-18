@@ -11,7 +11,6 @@ module ClientLib
 
 import qualified Lib
 
-
 import Control.Monad
 import Control.Exception
 
@@ -33,8 +32,6 @@ import Control.Concurrent.MVar
 
 -------------------------------------
 
---TODO, separate PROTOCOL module from TYPES module so things are more
---human readable
 import qualified KVProtocol (getMessage, sendMessage, connectToHost)
 import KVProtocol hiding (getMessage, sendMessage, connectToHost)
 import qualified Utils as Utils
@@ -139,8 +136,8 @@ registerWithMaster cfg = do
   forkIO $ timeoutThread handleMVar
   return handleMVar
 
---Send a registration message to the master with txn_id 0 and wait to receive
---clientId back
+-- | Send a registration message to the master with txn_id 0 and wait to receive
+-- clientId back
 registerWithMaster_ :: Lib.Config -> Socket -> MVar Handle -> IO ((ClientId, HostName, PortID), Handle)
 registerWithMaster_ cfg listener senderMVar = do
   portId@(PortNumber pid) <- NETWORK.socketPort listener
@@ -192,21 +189,22 @@ sendRequestAndWaitForResponse mvar req = do
 
   state' <- readMVar mvar
 
+  -- TODO: Better client side error handling
   catch (KVProtocol.sendMessage (sender state') request) 
         ((\(e :: SomeException) -> IO.putStr (show e)))
 
-  response <- takeMVar myMvar
+  responseMsg <- takeMVar myMvar
 
   state'' <- takeMVar mvar
   let outstandingTxns'' = Map.delete tid (outstandingTxns state'')
   putMVar mvar $ state'' { outstandingTxns = Map.delete tid (outstandingTxns state'')
                          , issuedTimes = Map.delete tid (issuedTimes state'')
                          }
-
-  return $ Just B.empty
-
---todo, modify these functions to re-sendtherequestandwaitforresponse if an
--- error occured.
+  case responseMsg of 
+    KVAck {}          -> return Nothing
+    KVResponse  _ _ r -> case r of
+                          KVSuccess k v -> return $ v
+                          KVFailure e   -> C8.putStrLn e >>= (\_ -> return Nothing)
 
 putVal :: MVar ClientState
        -> KVKey
