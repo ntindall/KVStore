@@ -48,7 +48,7 @@ parseArguments = do
       let (isLocal, n, workerN) = parseOptions options
           workerCfg = allocworkers isLocal n
       in case isLocal of
-        True -> return $ Just Config { masterHostName = "127.0.0.1"
+        True -> return $ Just Config { masterHostName = "171.67.216.73" --corn 08
                                      , masterPortId   = PortNumber 1063
                                      , clientConfig   = [] --TODO ALLOW DYNAMIC REGISTRATION OF CLIENTS
                                      , workerConfig    = workerCfg
@@ -73,6 +73,14 @@ parseOptions l = optionsAcc l (False, 1, Nothing)
 allocworkers :: Bool                                --is the configuration local?
             -> Int                                 --ring size
             -> [(HostName, PortID)]
-allocworkers True n  = zip (replicate n "127.0.0.1") (map PortNumber [1064..])
+allocworkers True n  = zip (["171.67.216.74" --corn09
+                            ,"171.67.216.72" --corn07
+                            ,"171.67.216.76" --corn11
+                            ,"171.67.216.67" --corn02
+                            ,"171.67.216.75" --corn10
+                            ,"171.67.216.77" --corn12
+                            ,"171.67.216.79" --corn14
+                            ,"171.67.216.80" --corn15
+                            ]) (replicate n (PortNumber 1064))
 allocworkers False _ = undefined --not implemented yet
 
