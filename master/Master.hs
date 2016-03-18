@@ -42,7 +42,7 @@ import Debug.Trace
 
 import qualified Utils as U
 
-type SlvId = Int
+type WkrId = Int
 
 --TODO
 --https://hackage.haskell.org/package/lrucache-1.2.0.0/docs/Data-Cache-LRU.html
@@ -68,10 +68,18 @@ data MasterState = MasterState {
 data TXState = VOTE | ACK | RESPONSE
   deriving (Show, Eq, Ord)
 
-data TX = TX { txState :: TXState
-             , responded :: S.Set SlvId
+data TX = TX { 
+               -- VOTE = PHASE1, ACK = PHASE 2, RESPONSE = GET
+               txState :: TXState
+               -- The set of worker nodes who have either responded with a VOTE
+               -- or with an ACK for a decision. This set is cleared when the 
+               -- transaction is moved into phase 2.
+             , responded :: S.Set WkrId
+               -- The decision that was made for this transaction (if any).
              , kvDecision :: Maybe KVDecision
+               -- The time at which the message was issued by the client
              , timeout :: KVTime
+               -- The message itself
              , message :: KVMessage
              }
  deriving (Show)
@@ -312,7 +320,7 @@ sendMsgToClient msg = get >>= \s -> liftIO $ do
 --------------------------------------------------------------------------------
 -------------------------------HELPER FUNCTIONS---------------------------------
 
-workerResponded :: KVTxnId -> SlvId -> MState MasterState IO ()
+workerResponded :: KVTxnId -> WkrId -> MState MasterState IO ()
 workerResponded tid wkrId = modifyM_ $ \s -> do
   let tx = lookupTX tid s
       tx' = fromJust tx
