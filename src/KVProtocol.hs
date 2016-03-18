@@ -22,6 +22,7 @@ module KVProtocol
   , listenOnPort
   ) where
 
+import Data.Either
 import Data.Serialize as CEREAL
 import Data.ByteString.Lazy  as B
 import Data.ByteString.Char8 as C8
@@ -64,7 +65,7 @@ data KVRequest = GetReq {
                   issuedUTC :: KVTime
                 , delkey :: KVKey
                 }
-  deriving (Generic, Show)
+  deriving (Show, Read)
 
 data KVResponse = KVSuccess {
                     key :: KVKey
@@ -73,13 +74,13 @@ data KVResponse = KVSuccess {
                 | KVFailure {
                     errorMsg :: B.ByteString
                   }
-  deriving (Generic, Show)
+  deriving (Show, Read)
 
 data KVDecision = DecisionCommit | DecisionAbort
-  deriving (Generic, Show, Eq)
+  deriving (Show, Eq, Read)
 
 data KVVote = VoteReady | VoteAbort
-  deriving (Generic, Show, Eq)
+  deriving (Show, Eq, Read)
 
 data KVMessage = KVRegistration {
                   txn_id :: KVTxnId
@@ -111,20 +112,21 @@ data KVMessage = KVRegistration {
                 , vote     :: KVVote
                 , request  :: KVRequest
                }        
-  deriving (Generic, Show)
+  deriving (Show, Read)
 
-instance Serialize KVRequest
-instance Serialize KVMessage
-instance Serialize KVResponse
-instance Serialize KVDecision
-instance Serialize KVVote
+-- instance Serialize KVRequest
+-- instance Serialize KVMessage
+-- instance Serialize KVResponse
+-- instance Serialize KVDecision
+-- instance Serialize KVVote
 
 --MICROSECONDS
 kV_TIMEOUT_MICRO :: KVTime
 kV_TIMEOUT_MICRO = 10000000
 
-decodeMsg :: B.ByteString -> Either String KVMessage
-decodeMsg = CEREAL.decodeLazy
+decodeMsg :: C8.ByteString -> Either String KVMessage
+decodeMsg msg = Right $ read (C8.unpack msg)
+-- decodeMsg = CEREAL.decodeLazy
 
 getMessage :: Handle -> IO(Either String KVMessage)
 getMessage h = do
@@ -132,21 +134,22 @@ getMessage h = do
   if C8.null bytes
   then return $ Left "Handle is empty"
   else do
-    let msg = decodeMsg (fromStrict bytes)
+    let msg = decodeMsg bytes
 
         color = either (\e -> brightRed)
                        (\m -> prettyPrint m)
                        msg
 
-
     -- Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
-    return $ decodeMsg (fromStrict bytes)
+    -- when (isLeft msg) (Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore brightRed)
+    return $ decodeMsg bytes
 
 --socket must already be connected
 sendMessage :: MVar Handle -> KVMessage -> IO ()
 sendMessage hMvar msg = do
   withMVar hMvar (\h -> do
-    C8.hPutStrLn h $ CEREAL.encode msg
+    -- C8.hPutStrLn h $ CEREAL.encode msg
+    C8.hPutStrLn h $ C8.pack $ show msg
     -- Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow
                  )
 

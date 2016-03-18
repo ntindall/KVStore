@@ -102,7 +102,7 @@ timeoutThread mvar = do
                       else return $ Nothing
                     ) $ Map.toList $ (issuedTimes state)
 
-  mapM (\tid -> IO.putStr $ "[!][!] Timing out" ++ show tid) (catMaybes timedOut)
+  mapM (\tid -> traceIO $ "[!][!] Timing out" ++ show tid) (catMaybes timedOut)
 
   --put a dummy message into the tids mvars, causing their waiting threads to wake up
   dummyMessage (outstandingTxns state) (catMaybes timedOut)
@@ -196,6 +196,10 @@ sendRequestAndWaitForResponse mvar req = do
         ((\(e :: SomeException) -> IO.putStr (show e)))
 
   response <- takeMVar myMvar
+
+  case response of 
+    KVAck {}  ->  return ()
+    _ -> traceIO $ show response
 
   state'' <- takeMVar mvar
   let outstandingTxns'' = Map.delete tid (outstandingTxns state'')

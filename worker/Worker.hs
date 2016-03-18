@@ -150,9 +150,9 @@ checkpoint = get >>= \s -> do
         myWorkerId = fromJust (Lib.workerNumber config)
 
     IO.putStrLn "[!][!][!] CHECKPOINT"
-    --If we have fully recovered
-    --if (Map.null $ recoveredTxns s)
-    --then do
+    -- If we have fully recovered
+    -- if (Map.null $ recoveredTxns s)
+    -- then do
     --  --lock down the log file, cannot have race between checkpoint being written
     --   --and log being flushed.
 
@@ -162,7 +162,7 @@ checkpoint = get >>= \s -> do
     --                  B.writeFile (persistentFileName myWorkerId) (Utils.writeKVList $ Map.toList (store s))
     --                  LOG.flush (LOG.persistentLogName myWorkerId) 
     --               )
-    --else do
+    -- else do
     --  withFileLock (persistentFileName myWorkerId) Exclusive 
     --               (\_ -> B.writeFile (persistentFileName myWorkerId) 
     --                                  (Utils.writeKVList $ Map.toList (store s))
