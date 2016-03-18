@@ -146,27 +146,28 @@ registerWithMaster_ cfg listener senderMVar = do
 
   KVProtocol.sendMessage senderMVar (KVRegistration (0, txn_id) hostName (fromEnum pid))
 
-  (clientId, h) <- waitForFirstAck -- wait for the Master to respond with the initial ack, and
+  (clientId, h) <- waitForFirstAck_ listener -- wait for the Master to respond with the initial ack, and
                               -- update the config to self identify with the clientId
   return ((clientId, hostName, portId), h)
 
-  where waitForFirstAck = do
-          (conn, _) <- establishAccept listener
+waitForFirstAck_ :: Socket -> IO ((ClientId, Handle))
+waitForFirstAck_ listener = do
+  (conn, _) <- establishAccept listener
 
-          h <- SOCKET.socketToHandle conn ReadMode
-          response <- KVProtocol.getMessage h
+  h <- SOCKET.socketToHandle conn ReadMode
+  response <- KVProtocol.getMessage h
 
-          either (\errmsg -> do
-                  IO.putStr $ errmsg ++ "\n"
-                  waitForFirstAck
-                 )
-                 (\kvMsg -> do
-                    case kvMsg of
-                      (KVAck (clientId, txn_id) _ _ ) -> return (clientId, h)
-                      _ -> do
-                        waitForFirstAck --todo, error handling
-                 )
-                 response
+  either (\errmsg -> do
+          IO.putStr $ errmsg ++ "\n"
+          waitForFirstAck_ listener
+         )
+         (\kvMsg -> do
+            case kvMsg of
+              (KVAck (clientId, txn_id) _ _ ) -> return (clientId, h)
+              _ -> do
+                waitForFirstAck_ listener 
+         )
+         response
 
 sendRequestAndWaitForResponse :: MVar ClientState -> KVRequest -> IO(Maybe KVVal)
 sendRequestAndWaitForResponse mvar req = do
@@ -206,6 +207,8 @@ sendRequestAndWaitForResponse mvar req = do
                           KVSuccess k v -> return $ v
                           KVFailure e   -> C8.putStrLn e >>= (\_ -> return Nothing)
 
+-- TODO: This API should retry or throw an exception if the message we got back
+-- indicated an error occured.
 putVal :: MVar ClientState
        -> KVKey
        -> KVVal

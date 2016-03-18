@@ -25,11 +25,11 @@ main :: IO ()
 main = Lib.parseArguments >>= \(Just config) -> do
   masterH <- CL.registerWithMaster config
 
- -- cLIissueRequests masterH
+  cLIissueRequests masterH
 
-  children <- issueNRequests masterH 1000 []
+  --children <- issueNRequests masterH 1000 []
 
-  mapM_ takeMVar children
+  --mapM_ takeMVar children
 
 issueNRequests :: CL.MasterHandle -> Int -> [MVar ()] -> IO ([MVar ()])
 issueNRequests mH n mvars

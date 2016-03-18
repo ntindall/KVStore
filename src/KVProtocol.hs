@@ -138,7 +138,8 @@ getMessage h = do
                        (\m -> prettyPrint m)
                        msg
 
-
+    --Note: serialization issue caused by CEREAL was fixed on the `bench'
+    --branch but not merged to master.
     Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
     return $ decodeMsg (fromStrict bytes)
 

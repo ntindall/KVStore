@@ -71,8 +71,8 @@ writeAbort filename msg = do
   withFileLock filename Exclusive (\_ -> B.appendFile filename logEntry)
 
 
---rebuild the in memory store using the log, redoing all committed actions that
---occured after a checkpoint
+-- | Rebuild the in memory store using the log, redoing all committed actions that
+-- occured after a checkpoint
 rebuild :: FilePath -> Map.Map KVKey (KVVal, KVTime) -> IO (Map.Map KVTxnId KVMessage, Map.Map KVKey (KVVal, KVTime))
 rebuild logPath oldStore = do
 
@@ -139,8 +139,7 @@ handleLines (x:xs) unmatchedReadyMap storeMap
         -- delete the transaction id from the unmatched readyMap
         handleLines xs (Map.delete txn_id unmatchedReadyMap) storeMap
 
---todo, auto touch files if they are not there
-persistentLogName :: Int -> String                                                   --todo, hacky
+persistentLogName :: Int -> String
 persistentLogName workerId = "database/logs/log_kvstore_" ++ show workerId ++ ".txt"
 
 --updateKVStore :: FilePath -> B.ByteString -> B.ByteString -> IO ()
