@@ -29,12 +29,15 @@ import Control.Monad.Trans (liftIO)
 
 import Data.Maybe
 
+import Debug.Trace
+
 import Control.Concurrent.Thread.Delay
 
 data TestState = TestState {
   masterKVHandle :: MasterHandle,
   masterHandle :: ProcessHandle,
-  slaveHandles :: [ProcessHandle]
+  slaveHandles :: [ProcessHandle],
+  numCompleted :: MVar Int
 }
 
 main :: IO ()
@@ -45,24 +48,27 @@ main = do
 
 runTests :: StateT TestState IO ()
 runTests = do
-  testN 5
+  testN 200
   killNodes
 
 setUpTopology :: IO TestState
 setUpTopology = do
   m <- spawnCommand "stack exec kvstore-master -- -l -n 1"
   delay 100000
-  sl <- spawnCommand "stack exec kvstore-slave -- -l -n 1 -i 0"
+  sl <- spawnCommand "stack exec kvstore-worker -- -l -n 1 -i 0"
+  delay 100000
+  sl2 <- spawnCommand "stack exec kvstore-worker -- -l -n 1 -i 0"
   delay 100000
   mh <- registerWithMaster testConfig
-  return $ TestState mh m [sl]
+  mvar <- newMVar 0
+  return $ TestState mh m [sl, sl2] mvar
 
 testConfig :: Lib.Config
 testConfig = do
   let hn = "127.0.0.1"
   let pno = PortNumber 1063
   let clientCfg = []
-  let slaveCfg = [("127.0.0.1", PortNumber 1064)]
+  let slaveCfg = [("127.0.0.1", PortNumber 1064), ("127.0.0.1", PortNumber 1065)]
   Lib.Config hn pno clientCfg slaveCfg Nothing Nothing
 
 killNodes :: StateT TestState IO ()
@@ -72,9 +78,25 @@ killNodes = get >>= \s -> liftIO $ do
   return ()
 
 testN :: Int -> StateT TestState IO ()
-testN 0 = return ()
-testN n = get >>= \s -> do
-  let key = C8.pack $ "key" ++ show n
-  let val = C8.pack $ "val" ++ show n
-  liftIO $ putVal (masterKVHandle s) key val
-  testN (n-1)
+testN n = do
+  testNSpawn n
+  testNWait n
+
+testNWait :: Int -> StateT TestState IO ()
+testNWait n = get >>= \s -> do
+  completed <- liftIO $ readMVar $ numCompleted s
+  if completed == n then return ()
+  else do
+    liftIO $ delay 10000
+    testNWait n
+
+testNSpawn :: Int -> StateT TestState IO ()
+testNSpawn 0 = return ()
+testNSpawn n = get >>= \s -> do
+  let k = C8.pack $ "key" ++ show n
+      v = C8.pack $ "val" ++ show n
+  _ <- liftIO $ forkIO $ do
+    putVal (masterKVHandle s) k v
+    i <- takeMVar (numCompleted s)
+    putMVar (numCompleted s) (i + 1)
+  testNSpawn (n-1)
