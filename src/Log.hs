@@ -141,10 +141,3 @@ handleLines (x:xs) unmatchedReadyMap storeMap
 
 persistentLogName :: Int -> String
 persistentLogName workerId = "database/logs/log_kvstore_" ++ show workerId ++ ".txt"
-
---updateKVStore :: FilePath -> B.ByteString -> B.ByteString -> IO ()
---updateKVStore filePath key val = do
---  kvMap <- liftM Utils.readKVList $ B.readFile filePath
---  let updatedKvMap = Map.insert key val (Map.fromList kvMap)
---  traceIO $ show updatedKvMap
---  B.writeFile filePath (Utils.writeKVList $ Map.toList updatedKvMap)
