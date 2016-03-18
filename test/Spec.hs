@@ -53,11 +53,11 @@ runTests = do
 
 setUpTopology :: IO TestState
 setUpTopology = do
-  m <- spawnCommand "stack exec kvstore-master -- -l -n 1"
+  m <- spawnCommand "stack exec kvstore-master -- -l -n 2"
   delay 100000
-  sl <- spawnCommand "stack exec kvstore-worker -- -l -n 1 -i 0"
+  sl <- spawnCommand "stack exec kvstore-worker -- -l -n 2 -i 0"
   delay 100000
-  sl2 <- spawnCommand "stack exec kvstore-worker -- -l -n 1 -i 0"
+  sl2 <- spawnCommand "stack exec kvstore-worker -- -l -n 2 -i 1"
   delay 100000
   mh <- registerWithMaster testConfig
   mvar <- newMVar 0

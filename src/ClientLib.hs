@@ -102,7 +102,7 @@ timeoutThread mvar = do
                       else return $ Nothing
                     ) $ Map.toList $ (issuedTimes state)
 
-  mapM (\tid -> IO.putStr $ "[!][!] Timing out" ++ show tid) (catMaybes timedOut)
+  -- mapM (\tid -> IO.putStr $ "[!][!] Timing out" ++ show tid) (catMaybes timedOut)
 
   --put a dummy message into the tids mvars, causing their waiting threads to wake up
   dummyMessage (outstandingTxns state) (catMaybes timedOut)
