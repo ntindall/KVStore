@@ -6,6 +6,8 @@ A distributed key-value store. Implemented in Haskell. CS240H Final Project.
 [Colin Man](mailto:colinman.stanford.edu),
 [Nathan James Tindall](mailto:ntindall@stanford.edu)
 
+[PDF writeup](https://github.com/ntindall/KVStore/blob/master/pdf/aergia-cs240h-chitters-man-tindall.pdf)
+
 # Usage
 
 To run the master node: `stack exec kvstore-master -- [options]`
