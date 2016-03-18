@@ -151,22 +151,22 @@ checkpoint = get >>= \s -> do
 
     IO.putStrLn "[!][!][!] CHECKPOINT"
     --If we have fully recovered
-    if (Map.null $ recoveredTxns s)
-    then do
-      --lock down the log file, cannot have race between checkpoint being written
-       --and log being flushed.
-      withFileLock (LOG.persistentLogName myWorkerId) Exclusive
-                   (\_ -> withFileLock (persistentFileName myWorkerId) Exclusive
-                      (\_ -> do
-                        B.writeFile (persistentFileName myWorkerId) (Utils.writeKVList $ Map.toList (store s))
-                        LOG.flush (LOG.persistentLogName myWorkerId) 
-                      )
-                   )
-    else do
-      withFileLock (persistentFileName myWorkerId) Exclusive 
-                   (\_ -> B.writeFile (persistentFileName myWorkerId) 
-                                      (Utils.writeKVList $ Map.toList (store s))
-                   )
+    --if (Map.null $ recoveredTxns s)
+    --then do
+    --  --lock down the log file, cannot have race between checkpoint being written
+    --   --and log being flushed.
+
+    --  IO.putStrLn "IN CHECKPOINT ABOUT TO LOCK"
+    --  withFileLock (LOG.persistentLogName myWorkerId) Exclusive
+    --               (\_ -> do
+    --                  B.writeFile (persistentFileName myWorkerId) (Utils.writeKVList $ Map.toList (store s))
+    --                  LOG.flush (LOG.persistentLogName myWorkerId) 
+    --               )
+    --else do
+    --  withFileLock (persistentFileName myWorkerId) Exclusive 
+    --               (\_ -> B.writeFile (persistentFileName myWorkerId) 
+    --                                  (Utils.writeKVList $ Map.toList (store s))
+    --               )
 
   liftIO $ threadDelay 10000000
   checkpoint
@@ -246,7 +246,7 @@ handleRequest msg = get >>= \s -> do
           in s' {unresolvedTxns = updatedTxnMap}
 
         liftIO $ do
-          LOG.writeReady (LOG.persistentLogName myWorkerId) msg
+          --LOG.writeReady (LOG.persistentLogName myWorkerId) msg
           KVProtocol.sendMessage (sender s) (KVVote field_txn myWorkerId VoteReady field_request)
 
       --todo, comment
@@ -256,7 +256,7 @@ handleRequest msg = get >>= \s -> do
           in s' {unresolvedTxns = updatedTxnMap}
 
         liftIO $ do
-          LOG.writeReady (LOG.persistentLogName myWorkerId) msg
+          --LOG.writeReady (LOG.persistentLogName myWorkerId) msg
           KVProtocol.sendMessage (sender s) (KVVote field_txn myWorkerId VoteReady field_request)
 
       GetReq _ key     -> liftIO $ do 
@@ -292,7 +292,7 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
   --REMOVE THIS IF YOU WANT WORKER TO NOT DIE PROBABALISTICALLY
   death <- liftIO $ mwc $ intIn (1,100)
   --don't make death too probable, leads to unrealistic problems (OS type issues)
-  if (death > 99) then liftIO $ raiseSignal sigABRT --die "--DIE!"
+  if (death > 101) then liftIO $ raiseSignal sigABRT --die "--DIE!"
   else do 
     let config = cfg s
         maybeRequest = lookupTX tid s
@@ -308,10 +308,11 @@ handleDecision msg@(KVDecision tid decision _) = get >>= \s -> do
           (PutReq ts k v) -> safeUpdateStore k (Just v) ts
           (DelReq ts k)   -> safeUpdateStore k Nothing ts
           (GetReq ts _) -> undefined -- protocol error
+      else liftIO $ return ()
 
-        liftIO $ LOG.writeCommit (LOG.persistentLogName myWorkerId) msg
-      else do
-        liftIO $ LOG.writeAbort (LOG.persistentLogName myWorkerId) msg
+      --  --liftIO $ LOG.writeCommit (LOG.persistentLogName myWorkerId) msg
+      --else do
+      --  liftIO $ LOG.writeAbort (LOG.persistentLogName myWorkerId) msg
 
       clearTxn tid
       let errormsg = if decision == DecisionCommit then Nothing

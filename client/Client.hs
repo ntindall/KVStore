@@ -27,7 +27,7 @@ main = Lib.parseArguments >>= \(Just config) -> do
 
  -- cLIissueRequests masterH
 
-  children <- issueNRequests masterH 1000 []
+  children <- issueNRequests masterH 100 []
 
   mapM_ takeMVar children
 
@@ -46,7 +46,7 @@ issueNRequests mH n mvars
                         return ()
                   ) (\_ -> putMVar m ())
 
-    threadDelay 50000
+    threadDelay 50000 --20 reqs a second
     issueNRequests mH (n - 1) (mvars ++ [m])
 
 createRequest n = let nBstring = C8.pack $ show n 

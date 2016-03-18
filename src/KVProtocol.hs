@@ -139,15 +139,15 @@ getMessage h = do
                        msg
 
 
-    Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
+    --Rainbow.putChunkLn $ chunk ("[!] Received: " ++ show msg) & fore color
     return $ decodeMsg (fromStrict bytes)
 
 --socket must already be connected
 sendMessage :: MVar Handle -> KVMessage -> IO ()
 sendMessage hMvar msg = do
   withMVar hMvar (\h -> do
-    C8.hPutStrLn h $ CEREAL.encode msg
-    Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow)
+    C8.hPutStrLn h $ CEREAL.encode msg)
+    --Rainbow.putChunkLn $ chunk ("[!] Sending: " ++ show msg) & fore brightYellow)
 
 --creates a WRITE socket for               
 connectToHost :: HostName -> PortID -> IO Handle

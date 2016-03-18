@@ -45,10 +45,10 @@ writeReady filename msg = do
                   DelReq ts key -> 
                     (C8.intercalate sep [C8.pack "DELETE", C8.pack $ show field_txn, key, C8.pack $ show ts]) `C8.append` (C8.pack "\n")
 
-  withFileLock filename Exclusive (\_ -> B.appendFile filename logEntry)
+  withFileLock filename Shared (\_ -> B.appendFile filename logEntry)
 
 flush :: FilePath -> IO ()
-flush filename = B.writeFile filename B.empty
+flush filename = withFileLock filename Exclusive (\_ -> B.writeFile filename B.empty)
 
 writeCommit :: FilePath -> KVMessage -> IO()
 writeCommit filename msg = do
@@ -58,7 +58,7 @@ writeCommit filename msg = do
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "COMMIT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
 
-  withFileLock filename Exclusive (\_ -> B.appendFile filename logEntry)
+  withFileLock filename Shared (\_ -> B.appendFile filename logEntry)
 
 writeAbort :: FilePath -> KVMessage -> IO()
 writeAbort filename msg = do
@@ -68,7 +68,7 @@ writeAbort filename msg = do
       sep = getSeparator
       logEntry = (C8.intercalate sep [C8.pack "ABORT", C8.pack $ show field_txn, C8.pack $ show time]) `C8.append` (C8.pack "\n")
 
-  withFileLock filename Exclusive (\_ -> B.appendFile filename logEntry)
+  withFileLock filename Shared (\_ -> B.appendFile filename logEntry)
 
 
 --rebuild the in memory store using the log, redoing all committed actions that
