@@ -121,7 +121,7 @@ instance Serialize KVVote
 
 --MICROSECONDS
 kV_TIMEOUT_MICRO :: KVTime
-kV_TIMEOUT_MICRO = 1000000
+kV_TIMEOUT_MICRO = 10000000
 
 decodeMsg :: B.ByteString -> Either String KVMessage
 decodeMsg = CEREAL.decodeLazy

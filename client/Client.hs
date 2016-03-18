@@ -46,7 +46,7 @@ issueNRequests mH n mvars
                         return ()
                   ) (\_ -> putMVar m ())
 
-    threadDelay 25000 --20 reqs a second
+    threadDelay 12500 --20 reqs a second
     issueNRequests mH (n - 1) (mvars ++ [m])
 
 createRequest n = let nBstring = C8.pack $ show n 

@@ -97,7 +97,7 @@ timeoutThread mvar = do
   now <- Utils.currentTimeMicro
 
   timedOut <- mapM  (\(tid, time) ->
-                      if (now - (KVProtocol.kV_TIMEOUT_MICRO * 4) >= time) --give master the benefit of the doubt...
+                      if (now - (KVProtocol.kV_TIMEOUT_MICRO) >= time) --give master the benefit of the doubt...
                       then return $ Just tid -- has timed out
                       else return $ Nothing
                     ) $ Map.toList $ (issuedTimes state)
